@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>All Weather Portfolio Manager</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; }
+body { font-family: 'Inter', 'Noto Sans KR', sans-serif; background: #f8fafc; }
+.mode-card { transition: all 0.3s ease; cursor: pointer; }
+.mode-card:hover { transform: translateY(-6px); box-shadow: 0 24px 48px rgba(0,0,0,0.15); }
+input[type="range"] { -webkit-appearance: none; width: 100%; height: 6px; border-radius: 3px; background: #e2e8f0; outline: none; }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.25); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; cursor: pointer; user-select:none; }
+.badge-stock { background: #dbeafe; color: #1d4ed8; }
+.badge-bond  { background: #d1fae5; color: #065f46; }
+.badge-comm  { background: #fef3c7; color: #92400e; }
+.fade-in { animation: fadeIn 0.35s ease; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+.spin { display:inline-block; width:16px; height:16px; border:2px solid #e2e8f0; border-top-color:#3b82f6; border-radius:50%; animation:rotate 0.8s linear infinite; }
+@keyframes rotate { to { transform:rotate(360deg); } }
+.row-buy    { background:#f0fdf4; }
+.row-sell   { background:#fff1f2; }
+.row-hold   { background:#f8fafc; }
+.row-miss   { background:#fffbeb; }
+.cls-header { background:#f1f5f9; }
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; }
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:4px; }
+.step-num { display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:#1e3a5f;color:white;font-size:11px;font-weight:700;flex-shrink:0; }
+.target-input { width:52px;text-align:right;border:1px solid #e2e8f0;border-radius:6px;padding:2px 4px;font-size:12px;color:#1e293b;background:#fff; }
+.target-input:focus { outline:none;border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,0.2); }
+</style>
+</head>
+<body class="min-h-screen">
+<div id="app"></div>
+<script>
+// ─── CONFIG ───────────────────────────────────────────────
+const DEFAULT_ASSETS = [
+  { ticker:'SPY',  name:'미국 주식 (S&P 500 ETF)',   type:'stock', weight:30,  color:'#3b82f6' },
+  { ticker:'TLT',  name:'장기 미국 국채 (20+년)',     type:'bond',  weight:40,  color:'#10b981' },
+  { ticker:'IEF',  name:'중기 미국 국채 (7~10년)',    type:'bond',  weight:15,  color:'#34d399' },
+  { ticker:'GLD',  name:'금 ETF (SPDR Gold)',        type:'comm',  weight:7.5, color:'#f59e0b' },
+  { ticker:'PDBC', name:'원자재 ETF (Invesco)',       type:'comm',  weight:7.5, color:'#d97706' },
+];
+const TYPE_META = {
+  stock: { label:'주식',   cls:'badge-stock', color:'#3b82f6' },
+  bond:  { label:'채권',   cls:'badge-bond',  color:'#10b981' },
+  comm:  { label:'원자재', cls:'badge-comm',  color:'#f59e0b' },
+};
+const TYPES = ['stock','bond','comm'];
+const DEFAULT_CLASS_TARGETS = [
+  { type:'stock', label:'주식',   weight:30, color:'#3b82f6' },
+  { type:'bond',  label:'채권',   weight:55, color:'#10b981' },
+  { type:'comm',  label:'원자재', weight:15, color:'#f59e0b' },
+];
+const KNOWN = {
+  SPY:'stock',VTI:'stock',QQQ:'stock',IVV:'stock',VOO:'stock',VEA:'stock',EFA:'stock',
+  VWO:'stock',EEM:'stock',IEFA:'stock',VGT:'stock',XLK:'stock',ARKK:'stock',SCHD:'stock',
+  VIG:'stock',VXUS:'stock',ITOT:'stock',IJR:'stock',IWM:'stock',DIA:'stock',
+  TLT:'bond',IEF:'bond',AGG:'bond',BND:'bond',LQD:'bond',HYG:'bond',JNK:'bond',
+  VCIT:'bond',VGLT:'bond',TIP:'bond',GOVT:'bond',BNDX:'bond',EMB:'bond',SHY:'bond',
+  EDV:'bond',ZROZ:'bond',MUB:'bond',IAGG:'bond',
+  GLD:'comm',IAU:'comm',SGOL:'comm',GLDM:'comm',BAR:'comm',
+  PDBC:'comm',DJP:'comm',GSG:'comm',DBC:'comm',COMT:'comm',USO:'comm',CORN:'comm',WEAT:'comm',
+};
+
+// ─── STATE ────────────────────────────────────────────────
+const S = {
+  mode: null,
+  currency: 'USD',
+  usdKrw: null,
+  krwFetchedAt: null,
+  amount: '',
+  assets: structuredClone(DEFAULT_ASSETS),
+  pricesFetched: false,
+  // each holding: { id, ticker, shares, price, type, targetPct, loading }
+  holdings: [{ id:1, ticker:'', shares:'', price:null, type:null, targetPct:null, loading:false }],
+  classTargets: structuredClone(DEFAULT_CLASS_TARGETS),
+  rFetched: false,
+  tab: 'input',
+  cash: 0, // stored in USD; user inputs in display currency
+};
+let chartA = null, chartB = null;
+
+// ─── API ──────────────────────────────────────────────────
+async function fetchPrice(sym) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`;
+  const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), 12000);
+    const res = await fetch(proxy, { signal: ctrl.signal });
+    clearTimeout(t);
+    const d = await res.json();
+    const r = d?.chart?.result?.[0];
+    if (!r) return null;
+    return { price: r.meta.regularMarketPrice, name: r.meta.longName || r.meta.shortName || sym };
+  } catch { return null; }
+}
+
+async function fetchKrw() {
+  const timeout = ms => new Promise((_,r) => setTimeout(() => r('timeout'), ms));
+  const apis = [
+    // 1순위: open.er-api.com (무료, KRW 지원)
+    async () => {
+      const d = await fetch('https://open.er-api.com/v6/latest/USD').then(r=>r.json());
+      if (d.result==='success' && d.rates?.KRW) return d.rates.KRW;
+      throw 0;
+    },
+    // 2순위: Yahoo Finance USDKRW=X via allorigins
+    async () => {
+      const url = 'https://query1.finance.yahoo.com/v8/finance/chart/USDKRW=X?interval=1d&range=1d';
+      const d = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`).then(r=>r.json());
+      const p = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+      if (p) return p;
+      throw 0;
+    }
+  ];
+  for (const api of apis) {
+    try {
+      const rate = await Promise.race([api(), timeout(8000)]);
+      if (typeof rate === 'number' && rate > 100) {
+        S.usdKrw = Math.round(rate);
+        S.krwFetchedAt = new Date().toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'});
+        return S.usdKrw;
+      }
+    } catch {}
+  }
+  S.usdKrw = 1380; S.krwFetchedAt = '오류(기본값)'; return 1380;
+}
+
+// Auto-fetch KRW on startup
+fetchKrw();
+
+// ─── DEBOUNCE ─────────────────────────────────────────────
+let _rt=null;
+function deferRender(){clearTimeout(_rt);_rt=setTimeout(render,220);}
+
+// ─── FORMAT ───────────────────────────────────────────────
+function fmt(n, dec=0) {
+  if (S.currency==='USD') return '$'+Math.abs(n).toLocaleString('en',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+  return '₩'+Math.abs(n).toLocaleString('ko',{maximumFractionDigits:0});
+}
+function toDisp(p) { return S.currency==='KRW' ? p*(S.usdKrw||1380) : p; }
+function amtToUsd(a) { return S.currency==='KRW' ? a/(S.usdKrw||1380) : a; }
+function rate() { return S.currency==='KRW' ? (S.usdKrw||1380) : 1; }
+
+// ─── RENDER ───────────────────────────────────────────────
+function render() {
+  const app = document.getElementById('app');
+  if (!S.mode)             app.innerHTML = landing();
+  else if (S.mode==='new') app.innerHTML = newPage();
+  else                     app.innerHTML = rebalPage();
+  initCharts();
+}
+
+// ─── LANDING ──────────────────────────────────────────────
+function landing() {
+  return `
+<div class="min-h-screen flex flex-col items-center justify-center p-6 fade-in"
+     style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 60%,#0f172a 100%)">
+  <div class="text-center mb-10">
+    <div class="inline-flex items-center gap-3 mb-3">
+      <div style="width:52px;height:52px;background:linear-gradient(135deg,#f59e0b,#d97706);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:26px">⚖️</div>
+      <div class="text-left">
+        <h1 class="text-3xl font-bold text-white tracking-tight">All Weather Portfolio</h1>
+        <p class="text-blue-300 text-sm">Ray Dalio · 전천후 포트폴리오</p>
+      </div>
+    </div>
+    <p class="text-slate-400 text-sm max-w-sm mx-auto leading-relaxed">
+      어떤 경제 환경에서도 안정적인 수익을 추구하는 포트폴리오를 구성하거나 리밸런싱하세요.
+    </p>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-5 max-w-xl w-full mb-10">
+    <div class="mode-card bg-white rounded-2xl p-7 text-center shadow-xl" onclick="go('new')">
+      <div style="width:60px;height:60px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:16px;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;font-size:26px">🌱</div>
+      <h2 class="text-lg font-bold text-slate-800 mb-2">신규 포트폴리오</h2>
+      <p class="text-slate-500 text-sm leading-relaxed mb-4">투자 금액 입력 → 자동 구성<br>비중·종목 자유롭게 수정 가능</p>
+      <div class="flex flex-wrap gap-2 justify-center">
+        <span class="px-2.5 py-1 bg-blue-50 text-blue-600 rounded-full text-xs font-medium">자동 배분</span>
+        <span class="px-2.5 py-1 bg-purple-50 text-purple-600 rounded-full text-xs font-medium">실시간 가격</span>
+        <span class="px-2.5 py-1 bg-green-50 text-green-600 rounded-full text-xs font-medium">비중 조절</span>
+      </div>
+    </div>
+    <div class="mode-card bg-white rounded-2xl p-7 text-center shadow-xl" onclick="go('rebal')">
+      <div style="width:60px;height:60px;background:linear-gradient(135deg,#f59e0b,#d97706);border-radius:16px;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;font-size:26px">🔄</div>
+      <h2 class="text-lg font-bold text-slate-800 mb-2">리밸런싱</h2>
+      <p class="text-slate-500 text-sm leading-relaxed mb-4">현재 보유 자산 입력 → 자동 분류<br>목표 비중까지 매수/매도 추천</p>
+      <div class="flex flex-wrap gap-2 justify-center">
+        <span class="px-2.5 py-1 bg-amber-50 text-amber-600 rounded-full text-xs font-medium">자동 분류</span>
+        <span class="px-2.5 py-1 bg-red-50 text-red-600 rounded-full text-xs font-medium">현황 분석</span>
+        <span class="px-2.5 py-1 bg-teal-50 text-teal-600 rounded-full text-xs font-medium">실행 계획</span>
+      </div>
+    </div>
+  </div>
+  <div class="max-w-xl w-full bg-white/10 rounded-2xl p-5 text-white">
+    <p class="text-center text-blue-200 text-xs font-medium mb-4 uppercase tracking-wider">All Weather 기본 구성</p>
+    <div class="grid grid-cols-5 gap-1">
+      ${DEFAULT_ASSETS.map(a=>`
+        <div class="text-center">
+          <div class="text-xl font-bold" style="color:${a.color}">${a.weight}%</div>
+          <div class="text-xs font-semibold text-slate-300 mt-0.5">${a.ticker}</div>
+          <div class="text-xs text-slate-500">${TYPE_META[a.type].label}</div>
+        </div>`).join('')}
+    </div>
+  </div>
+</div>`;
+}
+
+// ─── NEW PORTFOLIO ────────────────────────────────────────
+function newPage() {
+  const totalW = S.assets.reduce((s,a)=>s+parseFloat(a.weight||0),0);
+  const wOk = Math.abs(totalW-100)<0.1;
+  return `
+<div class="min-h-screen bg-slate-50 fade-in">
+  <nav class="bg-white border-b border-slate-200 px-5 py-3.5 flex items-center gap-3 sticky top-0 z-20 shadow-sm">
+    <button onclick="go(null)" class="text-slate-400 hover:text-slate-700 text-sm">← 홈</button>
+    <h1 class="flex-1 text-base font-bold text-slate-800">🌱 신규 포트폴리오</h1>
+    ${krwChip()}
+    <button onclick="toggleCur()" class="px-3 py-1 rounded-full text-sm font-semibold border-2 transition-all
+      ${S.currency==='USD'?'border-blue-500 text-blue-600 bg-blue-50':'border-amber-500 text-amber-600 bg-amber-50'}">
+      ${S.currency} ⇄
+    </button>
+  </nav>
+  <div class="max-w-6xl mx-auto p-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
+    <div class="lg:col-span-2 space-y-5">
+      <div class="bg-white rounded-2xl p-5 shadow-sm">
+        <h2 class="font-bold text-slate-800 mb-3">💰 투자 금액</h2>
+        <div class="flex gap-3">
+          <div class="flex-1 relative">
+            <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-medium select-none">${S.currency==='USD'?'$':'₩'}</span>
+            <input type="number" value="${S.amount}" placeholder="${S.currency==='USD'?'10000':'13000000'}"
+              class="w-full pl-8 pr-3 py-2.5 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
+              oninput="S.amount=this.value;refreshSummary()">
+          </div>
+          <button id="btnFetch" onclick="doFetchNew()"
+            class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium text-sm flex items-center gap-2 whitespace-nowrap">
+            <span id="fetchIco">📡</span><span id="fetchTxt">가격 조회</span>
+          </button>
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+          <h2 class="font-bold text-slate-800">📊 자산 배분</h2>
+          <div class="flex items-center gap-3">
+            <span id="wtotal" class="text-sm font-medium ${wOk?'text-green-600':'text-red-500'}">
+              합계 ${totalW.toFixed(1)}% ${wOk?'✓':'← 100%여야 합니다'}
+            </span>
+            <button onclick="resetAssets()" class="text-xs text-slate-400 underline hover:text-slate-600">초기화</button>
+          </div>
+        </div>
+        <div class="px-5 py-2.5 bg-slate-50 border-b border-slate-100 flex gap-2">
+          <input id="addTicker" type="text" placeholder="티커 추가 (예: VTI, BND…)"
+            class="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 uppercase"
+            onkeydown="if(event.key==='Enter')addAsset()">
+          <button onclick="addAsset()" class="px-4 py-1.5 bg-slate-700 text-white rounded-lg text-sm hover:bg-slate-800">+ 추가</button>
+        </div>
+        <div class="divide-y divide-slate-50">${S.assets.map((a,i)=>assetRow(a,i)).join('')}</div>
+      </div>
+      <div id="buyList">${S.pricesFetched&&S.amount?buyTable():''}</div>
+    </div>
+    <div class="space-y-5">
+      <div class="bg-white rounded-2xl p-5 shadow-sm">
+        <h2 class="font-bold text-slate-800 mb-4">포트폴리오 비중</h2>
+        <canvas id="chartNew" height="220"></canvas>
+        <div class="mt-4 space-y-1.5">
+          ${S.assets.map(a=>`
+            <div class="flex items-center justify-between text-sm">
+              <div class="flex items-center gap-2">
+                <div class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:${a.color}"></div>
+                <span class="text-slate-600 truncate max-w-[120px]" title="${a.name}">${a.ticker}</span>
+              </div>
+              <span class="font-semibold text-slate-800">${parseFloat(a.weight||0).toFixed(1)}%</span>
+            </div>`).join('')}
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl p-5 shadow-sm">
+        <h2 class="font-bold text-slate-800 mb-3">대분류 구성</h2>
+        ${typeBreakdown(S.assets)}
+      </div>
+    </div>
+  </div>
+</div>`;
+}
+
+function assetRow(a,i) {
+  const tm = TYPE_META[a.type]||TYPE_META.stock;
+  const dispPrice = a.price?(fmt(toDisp(a.price),2)):(a.loading?'':'—');
+  const shares = (S.amount&&a.price)?Math.floor(amtToUsd(parseFloat(S.amount))*parseFloat(a.weight||0)/100/a.price):null;
+  return `
+<div class="px-5 py-3.5">
+  <div class="flex items-start gap-3 mb-2.5">
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="font-bold text-slate-800">${a.ticker}</span>
+        <span class="badge ${tm.cls}" onclick="cycleType(${i})" title="클릭해서 변경">${tm.label} ↺</span>
+      </div>
+      <input value="${a.name}" oninput="S.assets[${i}].name=this.value"
+        class="text-xs text-slate-400 bg-transparent border-none outline-none w-full mt-0.5 truncate" placeholder="이름">
+    </div>
+    <div class="text-right flex-shrink-0">
+      ${a.loading?'<div class="spin mt-1"></div>':`<div class="text-sm font-medium text-slate-700">${dispPrice}</div>`}
+      ${shares!==null?`<div class="text-xs text-blue-500 font-medium">${shares}주 매수</div>`:''}
+    </div>
+    <button onclick="removeAsset(${i})" class="text-slate-300 hover:text-red-400 text-xl leading-none mt-0.5">×</button>
+  </div>
+  <div class="flex items-center gap-3">
+    <input type="range" min="0" max="100" step="0.5" value="${a.weight}" style="flex:1;accent-color:${a.color}"
+      oninput="updateW(${i},parseFloat(this.value));this.nextElementSibling.value=this.value">
+    <input type="number" value="${a.weight}" min="0" max="100" step="0.5"
+      class="w-16 text-center border border-slate-200 rounded-lg py-1 text-sm font-medium"
+      oninput="updateW(${i},parseFloat(this.value));this.previousElementSibling.value=this.value">
+    <span class="text-slate-400 text-sm">%</span>
+  </div>
+</div>`;
+}
+
+function buyTable() {
+  const amt = parseFloat(S.amount);
+  if (!amt) return '';
+  let totalSpent = 0;
+  const rows = S.assets.map(a=>{
+    if (!a.price) return null;
+    const allocUsd = amtToUsd(amt)*parseFloat(a.weight||0)/100;
+    const shares = Math.floor(allocUsd/a.price);
+    const cost = shares*toDisp(a.price);
+    totalSpent += cost;
+    return { ticker:a.ticker, price:toDisp(a.price), shares, cost, rem:amt*parseFloat(a.weight||0)/100-cost };
+  }).filter(Boolean);
+  if (!rows.length) return '';
+  return `
+<div class="bg-white rounded-2xl p-5 shadow-sm">
+  <h2 class="font-bold text-slate-800 mb-4">📋 매수 주문 목록</h2>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead><tr class="text-slate-400 border-b border-slate-100 text-xs">
+        <th class="text-left pb-2 font-medium">티커</th>
+        <th class="text-right pb-2 font-medium">현재가</th>
+        <th class="text-right pb-2 font-medium">매수량</th>
+        <th class="text-right pb-2 font-medium">투자금액</th>
+        <th class="text-right pb-2 font-medium">잔여</th>
+      </tr></thead>
+      <tbody class="divide-y divide-slate-50">
+        ${rows.map(r=>`<tr>
+          <td class="py-2 font-bold text-slate-800">${r.ticker}</td>
+          <td class="py-2 text-right text-slate-500">${fmt(r.price,2)}</td>
+          <td class="py-2 text-right font-semibold text-blue-600">${r.shares}주</td>
+          <td class="py-2 text-right text-slate-600">${fmt(r.cost)}</td>
+          <td class="py-2 text-right text-slate-400">${fmt(r.rem)}</td>
+        </tr>`).join('')}
+      </tbody>
+      <tfoot><tr class="border-t-2 border-slate-200 font-bold">
+        <td colspan="3" class="pt-3 text-slate-700">합계</td>
+        <td class="pt-3 text-right text-slate-800">${fmt(totalSpent)}</td>
+        <td class="pt-3 text-right text-green-600">${fmt(parseFloat(S.amount)-totalSpent)}</td>
+      </tr></tfoot>
+    </table>
+  </div>
+</div>`;
+}
+
+function typeBreakdown(assets) {
+  const byType = {};
+  assets.forEach(a=>{ byType[a.type]=(byType[a.type]||0)+parseFloat(a.weight||0); });
+  return Object.entries(byType).map(([t,w])=>{
+    const m = TYPE_META[t]||TYPE_META.stock;
+    return `
+<div class="mb-3">
+  <div class="flex justify-between text-sm mb-1">
+    <span class="badge ${m.cls}">${m.label}</span>
+    <span class="font-semibold text-slate-700">${w.toFixed(1)}%</span>
+  </div>
+  <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
+    <div class="h-full rounded-full" style="width:${Math.min(w,100)}%;background:${m.color}"></div>
+  </div>
+</div>`;
+  }).join('');
+}
+
+// ─── CLASS TARGETS PANEL (used in input tab) ──────────────
+function classTargetsPanel() {
+  const targetSum = S.classTargets.reduce((s,t)=>s+t.weight,0);
+  const targetOk = Math.abs(targetSum-100)<0.1;
+  return `
+<div class="bg-white rounded-2xl p-5 shadow-sm mb-5">
+  <div class="flex items-center justify-between mb-3">
+    <div>
+      <h2 class="font-bold text-slate-800">🎯 목표 자산 배분</h2>
+      <p class="text-xs text-slate-400 mt-0.5">대분류별 목표 비중을 먼저 설정하세요. 아래 자동 계산 버튼에서 활용됩니다.</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs font-semibold ${targetOk?'text-green-600':'text-red-500'}">합계 ${targetSum.toFixed(1)}% ${targetOk?'✓':'⚠'}</span>
+      <button onclick="resetClassTargets()" class="text-xs text-slate-400 underline hover:text-slate-600">All Weather 기본값</button>
+    </div>
+  </div>
+  <div class="grid grid-cols-3 gap-4">
+    ${S.classTargets.map((ct,ci)=>`
+    <div class="rounded-xl p-3" style="background:${ct.color}18">
+      <div class="flex items-center justify-between mb-2">
+        <span class="badge ${TYPE_META[ct.type].cls} text-sm">${ct.label}</span>
+        <div class="flex items-center gap-1">
+          <input type="number" value="${ct.weight}" min="0" max="100"
+            class="target-input w-14 text-base font-bold"
+            oninput="S.classTargets[${ci}].weight=parseFloat(this.value)||0"
+            onchange="render()">
+          <span class="text-slate-400 text-sm">%</span>
+        </div>
+      </div>
+      <input type="range" min="0" max="100" step="1" value="${ct.weight}"
+        style="accent-color:${ct.color};width:100%"
+        oninput="S.classTargets[${ci}].weight=parseFloat(this.value);render()">
+    </div>`).join('')}
+  </div>
+</div>`;
+}
+
+// ─── EXCHANGE RATE CHIP ────────────────────────────────────
+function krwChip() {
+  return `
+<div class="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-500">
+  <span>💱</span>
+  <span class="font-semibold text-slate-700">${S.usdKrw ? `₩${S.usdKrw.toLocaleString('ko',{maximumFractionDigits:0})}` : '조회 중…'}</span>
+  ${S.usdKrw ? `<span class="text-slate-400">/ $1</span>` : ''}
+  ${S.krwFetchedAt ? `<span class="text-slate-400 hidden sm:inline">· ${S.krwFetchedAt}</span>` : ''}
+  <button onclick="refreshKrw()" class="ml-1 text-blue-500 hover:text-blue-700" title="환율 새로고침">↻</button>
+</div>`;
+}
+
+// ─── REBALANCE ────────────────────────────────────────────
+function rebalPage() {
+  return `
+<div class="min-h-screen bg-slate-50 fade-in">
+  <nav class="bg-white border-b border-slate-200 px-5 py-3 flex items-center gap-3 sticky top-0 z-20 shadow-sm">
+    <button onclick="go(null)" class="text-slate-400 hover:text-slate-700 text-sm">← 홈</button>
+    <h1 class="flex-1 text-base font-bold text-slate-800">🔄 리밸런싱</h1>
+    ${krwChip()}
+    <button onclick="toggleCur()" class="px-3 py-1 rounded-full text-sm font-semibold border-2 transition-all
+      ${S.currency==='USD'?'border-blue-500 text-blue-600 bg-blue-50':'border-amber-500 text-amber-600 bg-amber-50'}">
+      ${S.currency} ⇄
+    </button>
+  </nav>
+  <div class="bg-white border-b border-slate-200">
+    <div class="flex max-w-6xl mx-auto px-5">
+      <button onclick="setTab('input')"
+        class="px-5 py-3 text-sm font-medium border-b-2 transition-colors
+          ${S.tab==='input'?'border-blue-600 text-blue-700':'border-transparent text-slate-500 hover:text-slate-700'}">
+        보유 현황 입력
+      </button>
+      <button onclick="setTab('analysis')"
+        class="px-5 py-3 text-sm font-medium border-b-2 transition-colors
+          ${S.tab==='analysis'?'border-blue-600 text-blue-700':'border-transparent text-slate-500 hover:text-slate-700'}">
+        리밸런싱 분석
+      </button>
+    </div>
+  </div>
+  <div class="max-w-6xl mx-auto p-5">
+    ${S.tab==='input' ? rebalInput() : rebalAnalysis()}
+  </div>
+</div>`;
+}
+
+// ─── INPUT TAB ────────────────────────────────────────────
+function rebalInput() {
+  const validH = S.holdings.filter(h=>h.ticker&&h.shares&&h.price);
+  const holdingsVal = validH.reduce((s,h)=>s+h.price*parseFloat(h.shares||0)*rate(),0);
+  const cashDisp = S.cash * rate();
+  const totalVal = holdingsVal + cashDisp;
+  const classSummary = calcClassSummary(validH, totalVal);
+  const targetSum = S.holdings.filter(h=>h.targetPct>0).reduce((s,h)=>s+h.targetPct,0);
+
+  return `
+${classTargetsPanel()}
+<div class="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3.5 flex items-center justify-between mb-5">
+  <div class="flex items-center gap-3">
+    <span class="text-2xl">💵</span>
+    <div>
+      <div class="font-semibold text-slate-800 text-sm">보유 현금</div>
+      <div class="text-xs text-slate-500">현금을 포함하면 리밸런싱 계산에 반영됩니다</div>
+    </div>
+  </div>
+  <div class="flex items-center gap-2">
+    <span class="text-slate-500 font-medium text-sm">${S.currency==='USD'?'$':'₩'}</span>
+    <input type="number" step="${S.currency==='USD'?'0.01':'1'}"
+      value="${cashDisp>0?(S.currency==='USD'?cashDisp.toFixed(2):Math.round(cashDisp)):''}"
+      placeholder="0"
+      class="w-40 px-3 py-1.5 border border-amber-300 rounded-xl text-sm text-right focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white font-medium"
+      onchange="S.cash=parseFloat(this.value||0)/rate();render()">
+    ${cashDisp>0&&totalVal>0?`<span class="text-xs text-amber-700 font-semibold whitespace-nowrap">${(cashDisp/totalVal*100).toFixed(1)}%</span>`:''}
+  </div>
+</div>
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+  <div class="lg:col-span-2">
+    <div class="bg-white rounded-2xl shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-slate-100">
+        <h2 class="font-bold text-slate-800">보유 자산 입력</h2>
+        <p class="text-xs text-slate-400 mt-0.5">ETF 티커·보유량 입력 → 가격·자산군 자동 조회. <b>목표 비중</b>은 자동 계산되며 직접 수정도 가능합니다.</p>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full min-w-[600px]">
+          <thead class="bg-slate-50 text-xs text-slate-500 font-medium">
+            <tr>
+              <th class="text-left px-4 py-2.5">티커</th>
+              <th class="text-right px-4 py-2.5">보유량(주)</th>
+              <th class="text-right px-4 py-2.5">현재가</th>
+              <th class="text-center px-4 py-2.5">자산군</th>
+              <th class="text-right px-4 py-2.5">현재 비중</th>
+              <th class="text-right px-4 py-2.5">목표 비중</th>
+              <th class="text-right px-4 py-2.5">평가금액</th>
+              <th class="px-3 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-50">
+            ${S.holdings.map((h,i)=>holdingRow(h,i,totalVal)).join('')}
+          </tbody>
+          ${validH.length>0 ? `
+          <tfoot class="bg-slate-50 text-xs text-slate-500 font-medium border-t border-slate-200">
+            <tr>
+              <td colspan="4" class="px-4 py-2">합계</td>
+              <td class="text-right px-4 py-2 font-semibold text-slate-700">${totalVal>0?(holdingsVal/totalVal*100).toFixed(1):100}%${cashDisp>0?' (+현금 '+((cashDisp/totalVal*100).toFixed(1))+'%)':''}</td>
+              <td class="text-right px-4 py-2 font-semibold ${Math.abs(targetSum-100)<0.5?'text-green-600':'text-amber-600'}">
+                ${targetSum.toFixed(1)}% ${Math.abs(targetSum-100)<0.5?'✓':'← 100%'}
+              </td>
+              <td class="text-right px-4 py-2 font-semibold text-slate-700">${fmt(totalVal)}</td>
+              <td></td>
+            </tr>
+          </tfoot>` : ''}
+        </table>
+      </div>
+      <div class="px-5 py-3.5 border-t border-slate-100 flex justify-between items-center">
+        <button onclick="addHolding()" class="text-sm text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded-lg font-medium">+ 자산 추가</button>
+        <div class="flex gap-2">
+          ${S.rFetched?`
+            <button onclick="autoFillTargets(false)" class="px-3 py-2 border border-slate-200 text-slate-600 rounded-xl text-sm hover:bg-slate-50" title="목표 비중이 비어있는 항목만 채웁니다">빈 항목 자동 계산</button>
+            <button onclick="autoFillTargets(true)" class="px-3 py-2 border border-blue-200 text-blue-600 rounded-xl text-sm hover:bg-blue-50" title="모든 목표 비중을 현재 비율 기준으로 재계산합니다">전체 재계산</button>
+          `:''}
+          <button id="rBtn" onclick="doFetchRebal()"
+            class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2">
+            <span id="rIco">📡</span><span id="rTxt">가격 조회 & 분류</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right sidebar -->
+  <div class="space-y-4">
+    <div class="bg-white rounded-2xl p-5 shadow-sm">
+      <h2 class="font-bold text-slate-800 mb-3">현재 포트폴리오</h2>
+      ${validH.length===0 ? `
+        <div class="text-center py-6 text-slate-400">
+          <div class="text-3xl mb-2">📊</div>
+          <p class="text-xs leading-relaxed">자산 입력 후 가격 조회 시 표시됩니다</p>
+        </div>` : `
+        <div class="text-2xl font-bold text-slate-800 mb-4">${fmt(totalVal)}</div>
+        <div class="space-y-3 mb-4">
+          ${classSummary.map(c=>`
+            <div>
+              <div class="flex justify-between text-sm mb-1">
+                <span class="badge ${TYPE_META[c.type].cls}">${c.label}</span>
+                <span class="font-semibold text-slate-700">${c.currentWeight.toFixed(1)}%</span>
+              </div>
+              <div class="h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                <div class="h-full rounded-full" style="width:${Math.min(c.currentWeight,100)}%;background:${c.color}"></div>
+              </div>
+              <div class="text-xs text-slate-400 mt-0.5">${fmt(c.classVal)} · ${c.holdings.length}종목</div>
+            </div>`).join('')}
+        </div>
+        <div class="border-t border-slate-100 pt-3 space-y-1.5">
+          ${validH.map(h=>{
+            const val = h.price*parseFloat(h.shares||0)*rate();
+            const pct = (val/totalVal*100).toFixed(1);
+            const m = TYPE_META[h.type]||TYPE_META.stock;
+            return `<div class="flex items-center justify-between text-xs">
+              <div class="flex items-center gap-1.5">
+                <div class="w-1.5 h-1.5 rounded-full" style="background:${m.color}"></div>
+                <span class="font-medium text-slate-700">${h.ticker}</span>
+                <span class="badge ${m.cls}" style="font-size:9px;padding:1px 5px">${m.label}</span>
+              </div>
+              <span class="text-slate-500">${pct}%</span>
+            </div>`;
+          }).join('')}
+          ${cashDisp>0?`
+          <div class="flex items-center justify-between text-xs pt-1 border-t border-slate-50 mt-1">
+            <div class="flex items-center gap-1.5">
+              <div class="w-1.5 h-1.5 rounded-full bg-amber-400"></div>
+              <span class="font-medium text-slate-700">현금</span>
+              <span class="text-amber-600 font-semibold" style="font-size:9px;padding:1px 5px;background:#fef3c7;border-radius:12px">CASH</span>
+            </div>
+            <div class="text-right">
+              <span class="text-slate-500">${(cashDisp/totalVal*100).toFixed(1)}%</span>
+              <span class="text-slate-400 ml-1">${fmt(cashDisp)}</span>
+            </div>
+          </div>`:''}
+        </div>`}
+    </div>
+    ${S.rFetched?`
+    <button onclick="setTab('analysis')"
+      class="w-full py-3.5 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-2xl font-bold hover:opacity-90 shadow-lg">
+      리밸런싱 분석 보기 →
+    </button>`:''}
+  </div>
+</div>`;
+}
+
+function holdingRow(h, i, totalVal) {
+  const m = h.type ? (TYPE_META[h.type]||TYPE_META.stock) : null;
+  const dispP = h.price ? fmt(toDisp(h.price),2) : (h.loading?'':'—');
+  const val = h.price&&h.shares ? h.price*parseFloat(h.shares)*rate() : 0;
+  const currentPct = (totalVal>0&&val>0) ? (val/totalVal*100).toFixed(1) : '—';
+  const evalAmt = val>0 ? fmt(val) : '—';
+  const tgt = (h.targetPct!==null&&h.targetPct!==undefined&&h.targetPct>0) ? h.targetPct.toFixed(1) : '';
+
+  return `
+<tr>
+  <td class="px-4 py-2.5">
+    <input type="text" value="${h.ticker}" placeholder="SPY"
+      class="w-20 px-2 py-1.5 border border-slate-200 rounded-lg text-sm font-mono font-bold uppercase text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
+      oninput="S.holdings[${i}].ticker=this.value.toUpperCase()"
+      onblur="autoType(${i})">
+  </td>
+  <td class="px-4 py-2.5">
+    <input type="number" value="${h.shares}" placeholder="0"
+      class="w-24 px-2 py-1.5 border border-slate-200 rounded-lg text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-400"
+      oninput="S.holdings[${i}].shares=this.value">
+  </td>
+  <td class="px-4 py-2.5 text-sm text-right">
+    ${h.loading?'<div class="spin ml-auto"></div>':`
+      <input type="number" step="0.01"
+        value="${h.price ? toDisp(h.price).toFixed(2) : ''}"
+        placeholder="직접 입력"
+        class="w-28 px-2 py-1.5 border ${h.price?'border-slate-200':'border-amber-300 bg-amber-50'} rounded-lg text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-400"
+        onchange="(function(v){const p=parseFloat(v);S.holdings[${i}].price=p>0?(S.currency==='KRW'?p/(S.usdKrw||1380):p):null;render();})(this.value)">
+    `}
+  </td>
+  <td class="px-4 py-2.5 text-center">
+    ${m?`<span class="badge ${m.cls}" onclick="cycleHType(${i})" title="클릭해서 변경">${m.label} ↺</span>`
+       :`<span class="text-slate-300 text-xs">자동분류</span>`}
+  </td>
+  <td class="px-4 py-2.5 text-right text-sm text-slate-500">${currentPct}${currentPct!=='—'?'%':''}</td>
+  <td class="px-4 py-2.5 text-right">
+    <div class="flex items-center justify-end gap-1">
+      <input class="target-input" type="number" value="${tgt}" min="0" max="100" step="0.5"
+        placeholder="—"
+        oninput="S.holdings[${i}].targetPct=parseFloat(this.value)||0"
+        title="목표 비중 (전체 포트 기준 %)">
+      <span class="text-xs text-slate-400">%</span>
+    </div>
+  </td>
+  <td class="px-4 py-2.5 text-right text-sm font-medium text-slate-700">${evalAmt}</td>
+  <td class="px-3 py-2.5">
+    ${i>0?`<button onclick="removeHolding(${i})" class="text-slate-300 hover:text-red-400 text-xl">×</button>`:''}
+  </td>
+</tr>`;
+}
+
+// ─── ANALYSIS TAB ─────────────────────────────────────────
+function rebalAnalysis() {
+  const validH = S.holdings.filter(h=>h.ticker&&h.shares&&h.price);
+  if (!validH.length) return `
+<div class="text-center py-20 text-slate-400">
+  <div class="text-5xl mb-4">📝</div>
+  <p class="text-base">"보유 현황 입력" 탭에서 자산을 입력하고<br>가격 조회를 눌러주세요.</p>
+</div>`;
+
+  const holdingsVal = validH.reduce((s,h)=>s+h.price*parseFloat(h.shares||0)*rate(),0);
+  const cashDisp = S.cash * rate();
+  const totalVal = holdingsVal + cashDisp;
+  const classSummary = calcClassSummary(validH, totalVal);
+  const actionGroups = calcActionGroups(validH, totalVal, classSummary);
+  const targetSum = S.classTargets.reduce((s,t)=>s+t.weight,0);
+  const targetOk = Math.abs(targetSum-100)<0.1;
+
+  return `
+<div class="space-y-5">
+
+  <!-- STEP 1 -->
+  <div class="bg-white rounded-2xl p-5 shadow-sm">
+    <div class="flex items-center gap-2 mb-5">
+      <span class="step-num">1</span>
+      <div>
+        <h2 class="font-bold text-slate-800">목표 자산 배분 설정</h2>
+        <p class="text-xs text-slate-400">대분류 기준으로 원하는 비중을 설정하세요 (아래 분석이 자동으로 업데이트됩니다)</p>
+      </div>
+      <button onclick="resetClassTargets()" class="ml-auto text-xs text-slate-400 underline hover:text-slate-600 whitespace-nowrap">All Weather 기본값</button>
+    </div>
+    <div class="grid grid-cols-3 gap-6">
+      ${S.classTargets.map((ct,i)=>{
+        const classInfo = classSummary.find(c=>c.type===ct.type);
+        const curW = classInfo ? classInfo.currentWeight : 0;
+        const diff = ct.weight - curW;
+        return `
+<div>
+  <div class="flex items-center justify-between mb-2">
+    <span class="badge ${TYPE_META[ct.type].cls} text-sm">${ct.label}</span>
+    <div class="flex items-center gap-1">
+      <input type="number" value="${ct.weight}" min="0" max="100"
+        class="target-input w-16 text-base font-bold"
+        oninput="S.classTargets[${i}].weight=parseFloat(this.value)||0"
+        onchange="render()">
+      <span class="text-slate-400 text-sm">%</span>
+    </div>
+  </div>
+  <input type="range" min="0" max="100" step="1" value="${ct.weight}"
+    style="accent-color:${ct.color}"
+    oninput="S.classTargets[${i}].weight=parseFloat(this.value);deferRender()">
+  <div class="flex justify-between text-xs mt-1">
+    <span class="text-slate-400">현재 ${curW.toFixed(1)}%</span>
+    <span class="${diff>1?'text-blue-500':diff<-1?'text-red-500':'text-green-500'} font-medium">
+      ${diff>0?'+':''}${diff.toFixed(1)}%
+    </span>
+  </div>
+</div>`;
+      }).join('')}
+    </div>
+    <div class="mt-3 text-right text-sm font-medium ${targetOk?'text-green-600':'text-red-500'}">
+      합계 ${targetSum.toFixed(1)}% ${targetOk?'✓':'← 합계가 100%여야 합니다'}
+    </div>
+  </div>
+
+  <!-- STEP 2 + 3 + sidebar -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+    <!-- Left -->
+    <div class="lg:col-span-2 space-y-5">
+
+      <!-- STEP 2 -->
+      <div class="bg-white rounded-2xl p-5 shadow-sm">
+        <div class="flex items-center gap-2 mb-4">
+          <span class="step-num">2</span>
+          <h2 class="font-bold text-slate-800">대분류 현황 비교</h2>
+          <span class="ml-auto text-base font-bold text-slate-800">${fmt(totalVal)}</span>
+        </div>
+        <div class="space-y-4">
+          ${classSummary.map(c=>{
+            const tgt = S.classTargets.find(t=>t.type===c.type);
+            const tarW = tgt?tgt.weight:0;
+            const diff = c.currentWeight - tarW;
+            const status = Math.abs(diff)<1 ? '적정' : diff>0 ? '과다' : '부족';
+            const stColor = Math.abs(diff)<1?'text-green-600 bg-green-50':diff>0?'text-red-600 bg-red-50':'text-blue-600 bg-blue-50';
+            return `
+<div class="p-3 rounded-xl bg-slate-50">
+  <div class="flex items-center justify-between mb-2">
+    <div class="flex items-center gap-2">
+      <span class="badge ${TYPE_META[c.type].cls}">${c.label}</span>
+      <span class="text-xs px-2 py-0.5 rounded-full font-semibold ${stColor}">${status}</span>
+    </div>
+    <div class="text-sm flex items-center gap-2">
+      <span class="font-bold text-slate-800">${c.currentWeight.toFixed(1)}%</span>
+      <span class="text-slate-300">→</span>
+      <span class="font-bold" style="color:${c.color}">${tarW.toFixed(1)}%</span>
+      <span class="text-xs ${diff>1?'text-red-500':diff<-1?'text-blue-500':'text-slate-400'}">(${diff>0?'+':''}${diff.toFixed(1)}%)</span>
+    </div>
+  </div>
+  <div class="relative h-4 bg-slate-200 rounded-full overflow-hidden">
+    <div class="absolute inset-y-0 left-0 rounded-full opacity-25" style="width:${tarW}%;background:${c.color}"></div>
+    <div class="absolute inset-y-0 left-0 rounded-full" style="width:${Math.min(c.currentWeight,100)}%;background:${c.color}"></div>
+    ${tarW>0?`<div class="absolute inset-y-0 border-l-2 border-white/80 border-dashed" style="left:${Math.min(tarW,100)}%"></div>`:''}
+  </div>
+  <div class="flex justify-between text-xs text-slate-400 mt-1">
+    <span>${fmt(c.classVal)}</span>
+    <span>목표 ${fmt(totalVal*tarW/100)}</span>
+  </div>
+</div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <!-- STEP 3 -->
+      <div class="bg-white rounded-2xl shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <span class="step-num">3</span>
+          <div>
+            <h2 class="font-bold text-slate-800">리밸런싱 실행 계획</h2>
+            <p class="text-xs text-slate-400">대분류 목표 비중을 달성하기 위한 종목별 매수/매도 — 같은 자산군은 현재 비율대로 분배됩니다</p>
+          </div>
+        </div>
+
+        ${actionGroups.every(g=>g.actions.length===0&&!g.noHolding)
+          ? `<div class="px-5 py-8 text-center text-slate-400 text-sm">이미 목표 비중에 가깝게 구성되어 있습니다 ✓</div>`
+          : actionGroups.map(group=>{
+              const m = TYPE_META[group.type];
+              const ct = S.classTargets.find(t=>t.type===group.type);
+              const tarW = ct?ct.weight:0;
+              const classInfo = classSummary.find(c=>c.type===group.type);
+              const curW = classInfo?classInfo.currentWeight:0;
+              const isOk = Math.abs(curW-tarW)<1;
+
+              const classLine = `
+<div class="cls-header px-5 py-2.5 flex items-center justify-between border-b border-slate-200">
+  <div class="flex items-center gap-2">
+    <span class="badge ${m.cls}">${m.label}</span>
+    <span class="text-sm text-slate-600 font-medium">${curW.toFixed(1)}% → ${tarW.toFixed(1)}%</span>
+    ${isOk?'<span class="text-xs text-green-600 font-semibold">✓ 적정</span>':''}
+  </div>
+  ${!isOk&&classInfo?`<span class="text-xs text-slate-500">${curW>tarW?'매도':'매수'} 필요 ${fmt(Math.abs(totalVal*tarW/100 - classInfo.classVal))}</span>`:''}
+</div>`;
+
+              const tickerLines = group.noHolding && tarW>0 ? `
+<div class="pl-8 pr-5 py-3.5 row-miss flex items-center justify-between">
+  <div class="flex items-center gap-2 text-amber-700">
+    <span>⚠️</span>
+    <span class="text-sm font-medium">${m.label} 종목이 없습니다</span>
+    <span class="text-xs text-slate-400">→ 보유 현황 탭에서 추가하세요</span>
+  </div>
+  <span class="text-sm font-bold text-blue-600">+${fmt(totalVal*tarW/100)} 필요</span>
+</div>` : group.actions.map(ac=>{
+                const rowCls = ac.action==='buy'?'row-buy':ac.action==='sell'?'row-sell':'row-hold';
+                const ico = ac.action==='buy'?'↑':ac.action==='sell'?'↓':'●';
+                const lbl = ac.action==='buy'?'매수':ac.action==='sell'?'매도':'유지';
+                const col = ac.action==='buy'?'text-green-600':ac.action==='sell'?'text-red-500':'text-slate-400';
+                const leftBorder = ac.action==='buy'?'border-l-2 border-green-400':ac.action==='sell'?'border-l-2 border-red-400':'border-l-2 border-slate-200';
+                return `
+<div class="pl-6 pr-5 py-3 ${rowCls} ${leftBorder}">
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <span class="text-base font-bold ${col} w-4 text-center">${ico}</span>
+      <div>
+        <span class="font-bold text-slate-800 text-sm">${ac.ticker}</span>
+        <div class="text-xs text-slate-400 mt-0.5">
+          현재 ${ac.currentPct.toFixed(1)}% → 목표 ${ac.targetPct.toFixed(1)}%
+        </div>
+      </div>
+    </div>
+    <div class="text-right">
+      <div class="font-bold ${col} text-sm">${lbl}${ac.shares>0?` ${ac.shares}주`:''}</div>
+      <div class="text-xs text-slate-500">${ac.delta>=0?'+':'−'}${fmt(Math.abs(ac.delta))}</div>
+      ${ac.price?`<div class="text-xs text-slate-400">@${fmt(toDisp(ac.price),2)}/주</div>`:''}
+    </div>
+  </div>
+</div>`;}).join('');
+
+              return classLine + tickerLines;
+            }).join('')}
+      </div>
+    </div>
+
+    <!-- Right sidebar -->
+    <div class="space-y-4">
+      <div class="bg-white rounded-2xl p-5 shadow-sm">
+        <h2 class="font-bold text-slate-800 mb-3 text-sm">보유 종목 현황</h2>
+        <canvas id="chartRbal" height="180"></canvas>
+        <div class="mt-3 space-y-2">
+          ${validH.map(h=>{
+            const val = h.price*parseFloat(h.shares||0)*rate();
+            const pct = (val/totalVal*100).toFixed(1);
+            const m = TYPE_META[h.type]||TYPE_META.stock;
+            const tgt = h.targetPct ? h.targetPct.toFixed(1) : '—';
+            return `
+<div class="text-xs py-1.5 border-b border-slate-50 last:border-0">
+  <div class="flex items-center justify-between mb-0.5">
+    <div class="flex items-center gap-1.5">
+      <div class="w-2 h-2 rounded-full flex-shrink-0" style="background:${m.color}"></div>
+      <span class="font-semibold text-slate-700">${h.ticker}</span>
+      <span class="badge ${m.cls}" style="font-size:9px;padding:1px 5px">${m.label}</span>
+    </div>
+    <div class="text-right">
+      <span class="text-slate-600 font-medium">${pct}%</span>
+      <span class="text-slate-300 mx-1">→</span>
+      <span class="font-semibold text-slate-700">${tgt}%</span>
+    </div>
+  </div>
+  <div class="flex justify-between text-slate-400 pl-3.5">
+    <span>${parseFloat(h.shares)}주 · ${fmt(toDisp(h.price),2)}/주</span>
+    <span>${fmt(val)}</span>
+  </div>
+</div>`;
+          }).join('')}
+          ${cashDisp>0?`
+<div class="text-xs py-1.5 mt-1 border-t border-amber-100 pt-2">
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-1.5">
+      <div class="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0"></div>
+      <span class="font-semibold text-slate-700">현금</span>
+      <span style="font-size:9px;padding:1px 5px;background:#fef3c7;color:#92400e;border-radius:12px;font-weight:600">CASH</span>
+    </div>
+    <span class="text-slate-600 font-medium">${(cashDisp/totalVal*100).toFixed(1)}%</span>
+  </div>
+  <div class="text-slate-400 pl-3.5 mt-0.5">${fmt(cashDisp)}</div>
+</div>`:''}
+        </div>
+      </div>
+      ${cashDisp>0?(()=>{
+        const totalBuy = actionGroups.flatMap(g=>g.actions).filter(a=>a.action==='buy').reduce((s,a)=>s+Math.abs(a.delta),0);
+        const totalSell = actionGroups.flatMap(g=>g.actions).filter(a=>a.action==='sell').reduce((s,a)=>s+Math.abs(a.delta),0);
+        const netBuy = Math.max(0, totalBuy - totalSell);
+        const remaining = cashDisp - netBuy;
+        const sufficient = remaining >= 0;
+        return `
+<div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs space-y-2">
+  <div class="font-semibold text-amber-800 flex items-center gap-1.5">💵 현금 활용 계획</div>
+  <div class="flex justify-between text-slate-600">
+    <span>보유 현금</span><span class="font-semibold">${fmt(cashDisp)}</span>
+  </div>
+  <div class="flex justify-between text-slate-600">
+    <span>필요 매수 합계</span><span class="font-semibold text-blue-600">${fmt(totalBuy)}</span>
+  </div>
+  ${totalSell>0?`<div class="flex justify-between text-slate-600">
+    <span>매도 회수 예정</span><span class="font-semibold text-red-500">+${fmt(totalSell)}</span>
+  </div>`:''}
+  <div class="border-t border-amber-200 pt-2 flex justify-between font-semibold ${sufficient?'text-green-700':'text-red-600'}">
+    <span>${sufficient?'현금 잔여':'추가 필요 자금'}</span>
+    <span>${sufficient?fmt(remaining):'부족 '+fmt(Math.abs(remaining))}</span>
+  </div>
+  ${sufficient?'<div class="text-green-700 text-xs">✓ 현금만으로 리밸런싱 가능합니다</div>':'<div class="text-red-600 text-xs">⚠ 일부 자산 매도가 필요합니다</div>'}
+</div>`;
+      })():''}
+    </div>
+
+  </div>
+</div>`;
+}
+
+// ─── CALCULATIONS ─────────────────────────────────────────
+function calcClassSummary(validH, totalVal) {
+  return S.classTargets.map(ct=>{
+    const classH = validH.filter(h=>(h.type||'stock')===ct.type);
+    const classVal = classH.reduce((s,h)=>s+h.price*parseFloat(h.shares||0)*rate(),0);
+    return { ...ct, currentWeight:totalVal>0?classVal/totalVal*100:0, classVal, holdings:classH };
+  });
+}
+
+function calcActionGroups(validH, totalVal, classSummary) {
+  return TYPES.map(type=>{
+    const ct = S.classTargets.find(t=>t.type===type);
+    if (!ct) return null;
+    const classInfo = classSummary.find(c=>c.type===type);
+    const classH = classInfo ? classInfo.holdings : [];
+    const classVal = classInfo ? classInfo.classVal : 0;
+    const classCurrentPct = classInfo ? classInfo.currentWeight : 0;
+
+    if (classH.length===0) {
+      return { type, actions:[], noHolding: ct.weight>0 };
+    }
+
+    const targetVal = totalVal * ct.weight / 100;
+    const classDelta = targetVal - classVal;
+
+    const actions = classH.map(h=>{
+      const hVal = h.price*parseFloat(h.shares||0)*rate();
+      const hCurrentPct = totalVal>0 ? hVal/totalVal*100 : 0;
+
+      // Use manually-set targetPct if available, else proportional of class target
+      let hTargetPct;
+      if (h.targetPct && h.targetPct > 0) {
+        hTargetPct = h.targetPct;
+      } else {
+        const proportion = classVal>0 ? hVal/classVal : 1/classH.length;
+        hTargetPct = ct.weight * proportion;
+      }
+
+      const hTargetVal = totalVal * hTargetPct / 100;
+      const hDelta = hTargetVal - hVal;
+      const dispP = toDisp(h.price);
+      const shares = Math.round(Math.abs(hDelta) / dispP);
+      const action = Math.abs(hCurrentPct - hTargetPct) < 0.5 ? 'hold'
+                   : hDelta > 0 ? 'buy' : 'sell';
+
+      return { ticker:h.ticker, type, currentPct:hCurrentPct, targetPct:hTargetPct,
+               delta:hDelta, shares, price:h.price, action };
+    });
+
+    return { type, actions, noHolding:false };
+  }).filter(Boolean);
+}
+
+// Auto-fill targetPct proportionally from class targets
+// force=true: overwrites all (reset), force=false: only fills unset ones
+function autoFillTargets(force=false) {
+  const validH = S.holdings.filter(h=>h.ticker&&h.shares&&h.price);
+  const totalVal = validH.reduce((s,h)=>s+h.price*parseFloat(h.shares||0)*rate(),0);
+  const classSummary = calcClassSummary(validH, totalVal);
+
+  S.holdings.forEach(h=>{
+    if (!h.price||!h.shares) return;
+    if (!force && h.targetPct>0) return; // keep manually set values
+    const classInfo = classSummary.find(c=>c.type===h.type);
+    const ct = S.classTargets.find(t=>t.type===h.type);
+    if (!classInfo||!ct) { h.targetPct=0; return; }
+    const hVal = h.price*parseFloat(h.shares||0)*rate();
+    h.targetPct = classInfo.classVal>0
+      ? parseFloat((ct.weight * (hVal/classInfo.classVal)).toFixed(1))
+      : parseFloat((ct.weight / classInfo.holdings.length).toFixed(1));
+  });
+  render();
+}
+
+// ─── CHARTS ───────────────────────────────────────────────
+function initCharts() {
+  setTimeout(()=>{
+    if (S.mode==='new') {
+      const c=document.getElementById('chartNew');
+      if(c){const ex=Chart.getChart(c);if(ex)ex.destroy();}
+      if(c) chartA=new Chart(c,{type:'doughnut',data:{
+        labels:S.assets.map(a=>a.ticker),
+        datasets:[{data:S.assets.map(a=>parseFloat(a.weight||0)),backgroundColor:S.assets.map(a=>a.color),borderWidth:2,borderColor:'#f8fafc'}]},
+        options:{responsive:true,cutout:'62%',plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>` ${ctx.label}: ${ctx.parsed.toFixed(1)}%`}}}}
+      });
+    }
+    if (S.mode==='rebal'&&S.tab==='analysis') {
+      const validH=S.holdings.filter(h=>h.ticker&&h.shares&&h.price);
+      if(!validH.length) return;
+      const totalVal=validH.reduce((s,h)=>s+h.price*parseFloat(h.shares||0)*rate(),0);
+      const c=document.getElementById('chartRbal');
+      if(c){const ex=Chart.getChart(c);if(ex)ex.destroy();}
+      if(c) chartB=new Chart(c,{type:'doughnut',data:{
+        labels:validH.map(h=>h.ticker),
+        datasets:[{data:validH.map(h=>+(h.price*parseFloat(h.shares||0)*rate()/totalVal*100).toFixed(1)),
+          backgroundColor:validH.map(h=>(TYPE_META[h.type]||TYPE_META.stock).color),borderWidth:2,borderColor:'#f8fafc'}]},
+        options:{responsive:true,cutout:'58%',plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>` ${ctx.label}: ${ctx.parsed}%`}}}}
+      });
+    }
+  },80);
+}
+
+// ─── ACTIONS ──────────────────────────────────────────────
+window.go = m => { S.mode=m; render(); };
+window.toggleCur = async()=>{ S.currency=S.currency==='USD'?'KRW':'USD'; render(); };
+window.refreshKrw = async()=>{ await fetchKrw(); render(); };
+window.setTab = t=>{ S.tab=t; render(); };
+window.resetAssets = ()=>{ S.assets=structuredClone(DEFAULT_ASSETS); S.pricesFetched=false; render(); };
+window.resetClassTargets = ()=>{ S.classTargets=structuredClone(DEFAULT_CLASS_TARGETS); render(); };
+window.autoFillTargets = autoFillTargets;
+window.refreshSummary = ()=>{
+  document.getElementById('buyList').innerHTML=S.pricesFetched&&S.amount?buyTable():'';
+};
+window.updateW = (i,v)=>{
+  S.assets[i].weight=v;
+  const total=S.assets.reduce((s,a)=>s+parseFloat(a.weight||0),0);
+  const el=document.getElementById('wtotal');
+  if(el){const ok=Math.abs(total-100)<0.1;el.textContent=`합계 ${total.toFixed(1)}% ${ok?'✓':'← 100%여야 합니다'}`;el.className=`text-sm font-medium ${ok?'text-green-600':'text-red-500'}`;}
+  if(chartA){chartA.data.datasets[0].data=S.assets.map(a=>parseFloat(a.weight||0));chartA.update();}
+  document.getElementById('buyList').innerHTML=S.pricesFetched&&S.amount?buyTable():'';
+};
+window.cycleType = i=>{ S.assets[i].type=TYPES[(TYPES.indexOf(S.assets[i].type||'stock')+1)%TYPES.length]; render(); };
+window.removeAsset = i=>{ S.assets.splice(i,1); render(); };
+window.addAsset = async()=>{
+  const inp=document.getElementById('addTicker');
+  const tk=(inp?.value||'').trim().toUpperCase();
+  if(!tk)return; inp.value='';
+  const used=S.assets.reduce((s,a)=>s+parseFloat(a.weight||0),0);
+  S.assets.push({ticker:tk,name:tk,type:KNOWN[tk]||'stock',weight:Math.max(0,Math.min(5,100-used)),color:`hsl(${Math.random()*360},65%,55%)`,price:null,loading:true});
+  render();
+  const d=await fetchPrice(tk);
+  const a=S.assets.find(x=>x.ticker===tk);
+  if(a){a.loading=false;if(d){a.price=d.price;if(d.name&&d.name.length>3)a.name=d.name;}render();}
+};
+window.doFetchNew = async()=>{
+  const btn=document.getElementById('btnFetch');
+  if(btn){btn.disabled=true;document.getElementById('fetchIco').innerHTML='<div class="spin"></div>';document.getElementById('fetchTxt').textContent='조회 중…';}
+  for(const a of S.assets){a.loading=true;a.price=null;}
+  for(const a of S.assets){const d=await fetchPrice(a.ticker);a.loading=false;if(d){a.price=d.price;if(d.name&&d.name.length>3)a.name=d.name;}}
+  S.pricesFetched=true;render();
+};
+window.addHolding = ()=>{ S.holdings.push({id:Date.now(),ticker:'',shares:'',price:null,type:null,targetPct:null,loading:false});render(); };
+window.removeHolding = i=>{ S.holdings.splice(i,1);render(); };
+window.autoType = i=>{
+  const t=S.holdings[i].ticker;
+  if(t&&KNOWN[t]&&!S.holdings[i].type){S.holdings[i].type=KNOWN[t];render();}
+};
+window.cycleHType = i=>{ S.holdings[i].type=TYPES[(TYPES.indexOf(S.holdings[i].type||'stock')+1)%TYPES.length];render(); };
+window.doFetchRebal = async()=>{
+  const btn=document.getElementById('rBtn');
+  if(btn){btn.disabled=true;document.getElementById('rIco').innerHTML='<div class="spin"></div>';document.getElementById('rTxt').textContent='조회 중…';}
+  for(const h of S.holdings){if(!h.ticker)continue;h.loading=true;const d=await fetchPrice(h.ticker);h.loading=false;if(d)h.price=d.price;if(!h.type)h.type=KNOWN[h.ticker]||'stock';}
+  S.rFetched=true;
+  render();
+};
+
+render();
+</script>
+</body>
+</html>
