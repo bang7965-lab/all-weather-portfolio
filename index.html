@@ -84,6 +84,8 @@ const S = {
   rFetched: false,
   tab: 'input',
   cash: 0, // stored in USD; user inputs in display currency
+  toleranceBand: 5, // ± % — classes within this band are "stable", no trade needed
+  rebalMode: 'B',  // 'A' = buy-only, 'B' = full rebalancing
 };
 let chartA = null, chartB = null;
 
@@ -722,6 +724,126 @@ function rebalAnalysis() {
     </div>
   </div>
 
+  <!-- Strategy Summary Banner -->
+  ${(()=>{
+    const band = S.toleranceBand||5;
+    const stableCount = actionGroups.filter(g=>g.stable).length;
+    const needCount = actionGroups.filter(g=>!g.stable&&!g.noHolding&&g.actions.some(a=>a.action!=='hold')).length;
+    const hasCash = cashDisp > 0;
+    const totalBuyNeeded = actionGroups.flatMap(g=>g.actions).filter(a=>a.action==='buy').reduce((s,a)=>s+Math.abs(a.delta),0);
+    const canBuyOnly = hasCash && totalBuyNeeded <= cashDisp && actionGroups.flatMap(g=>g.actions).every(a=>a.action!=='sell');
+    if (stableCount===3) return `
+<div class="bg-green-50 border border-green-200 rounded-2xl px-5 py-3.5 flex items-center gap-3">
+  <span class="text-xl">✅</span>
+  <div>
+    <p class="font-semibold text-green-800 text-sm">포트폴리오가 안정적입니다</p>
+    <p class="text-xs text-green-600 mt-0.5">모든 자산군이 허용 오차(±${band}%) 범위 내에 있어 매매가 불필요합니다.</p>
+  </div>
+</div>`;
+    return `
+<div class="bg-blue-50 border border-blue-100 rounded-2xl px-5 py-3.5 flex items-start gap-3">
+  <span class="text-xl mt-0.5">${canBuyOnly?'📥':'⚖️'}</span>
+  <div class="flex-1">
+    <p class="font-semibold text-blue-800 text-sm">${canBuyOnly?'Inflow Priority — 매수 전용 리밸런싱 가능':'리밸런싱 권고'}</p>
+    <p class="text-xs text-blue-600 mt-0.5">
+      ${stableCount}개 자산군 안정적 · ${needCount}개 자산군 조정 필요
+      ${canBuyOnly?' · 보유 현금으로 매수만으로 목표 달성 가능 (세금 절감)':''}
+    </p>
+  </div>
+  <div class="text-right text-xs text-slate-500 whitespace-nowrap">허용 오차 ±${band}%</div>
+</div>`;
+  })()}
+
+  <!-- Scenario Selector (only when both buy & sell classes exist outside band) -->
+  ${(()=>{
+    const sc = calcScenarios(validH, totalVal, cashDisp, classSummary);
+    if (!sc.bothNeeded) return '';
+    const modeA = S.rebalMode === 'A';
+    const modeB = S.rebalMode === 'B';
+    const cur = S.currency === 'USD' ? '$' : '₩';
+    return `
+<div class="bg-white rounded-2xl p-5 shadow-sm">
+  <div class="flex items-center gap-2 mb-4">
+    <h2 class="font-bold text-slate-800">💡 리밸런싱 전략 선택</h2>
+    <span class="text-xs text-slate-400 ml-1">아래 두 전략 중 하나를 선택하세요</span>
+  </div>
+  <div class="grid grid-cols-2 gap-4">
+
+    <!-- Scenario A: Buy-Only -->
+    <div onclick="S.rebalMode='A';render()"
+      class="rounded-xl border-2 p-4 cursor-pointer transition-all ${modeA?'border-blue-500 bg-blue-50 shadow-md':'border-slate-200 hover:border-blue-300 bg-slate-50'}">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-lg">📥</span>
+        <div>
+          <div class="font-bold text-slate-800 text-sm">A. 매수 전용</div>
+          <div class="text-xs text-slate-500">현재 자산 유지 + 추가 매수</div>
+        </div>
+        ${modeA?'<span class="ml-auto text-xs bg-blue-500 text-white px-2 py-0.5 rounded-full font-semibold">선택됨</span>':''}
+      </div>
+      <div class="space-y-2 text-xs">
+        <div class="flex items-center justify-between py-1.5 border-b border-slate-200">
+          <span class="text-slate-500">매도 여부</span>
+          <span class="font-semibold text-green-600">❌ 매도 없음 (세금 절감)</span>
+        </div>
+        ${sc.buyDetails.map(b=>`
+        <div class="flex justify-between">
+          <span class="text-slate-500">${b.label} 매수</span>
+          <span class="font-semibold text-blue-600">+${fmt(b.amount)}</span>
+        </div>`).join('')}
+        <div class="flex justify-between border-t border-slate-200 pt-2 mt-1">
+          <span class="text-slate-500">보유 현금</span>
+          <span class="font-semibold">${fmt(cashDisp)}</span>
+        </div>
+        <div class="flex justify-between font-bold pt-1 ${sc.scenA.feasible?'text-green-700':'text-orange-600'}">
+          <span>${sc.scenA.feasible?'현금 잔여':'추가 필요 현금'}</span>
+          <span>${sc.scenA.feasible ? fmt(sc.scenA.cashSurplus) : '+'+fmt(sc.scenA.extraNeeded)+' 부족'}</span>
+        </div>
+        ${!sc.scenA.feasible?`<div class="text-xs text-orange-600 bg-orange-50 rounded-lg p-2 mt-1">
+          💡 ${fmt(sc.scenA.extraNeeded)}만 추가 입금하면<br>매도 없이 리밸런싱 가능합니다
+        </div>`:`<div class="text-xs text-green-700 bg-green-50 rounded-lg p-2 mt-1">✓ 현금만으로 매수 가능합니다</div>`}
+      </div>
+    </div>
+
+    <!-- Scenario B: Full Rebalancing -->
+    <div onclick="S.rebalMode='B';render()"
+      class="rounded-xl border-2 p-4 cursor-pointer transition-all ${modeB?'border-purple-500 bg-purple-50 shadow-md':'border-slate-200 hover:border-purple-300 bg-slate-50'}">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-lg">⚖️</span>
+        <div>
+          <div class="font-bold text-slate-800 text-sm">B. 전체 리밸런싱</div>
+          <div class="text-xs text-slate-500">매도 후 매수 + 현금 활용</div>
+        </div>
+        ${modeB?'<span class="ml-auto text-xs bg-purple-500 text-white px-2 py-0.5 rounded-full font-semibold">선택됨</span>':''}
+      </div>
+      <div class="space-y-2 text-xs">
+        ${sc.sellDetails.map(s=>`
+        <div class="flex items-center justify-between py-1.5 border-b border-slate-200">
+          <span class="text-slate-500">${s.label} 매도 (예정)</span>
+          <span class="font-semibold text-red-500">-${fmt(s.amount)}</span>
+        </div>`).join('')}
+        ${sc.buyDetails.map(b=>`
+        <div class="flex justify-between">
+          <span class="text-slate-500">${b.label} 매수</span>
+          <span class="font-semibold text-blue-600">+${fmt(b.amount)}</span>
+        </div>`).join('')}
+        <div class="flex justify-between border-t border-slate-200 pt-2 mt-1">
+          <span class="text-slate-500">현금 + 매도금 합계</span>
+          <span class="font-semibold">${fmt(sc.scenB.available)}</span>
+        </div>
+        <div class="flex justify-between font-bold pt-1 ${sc.scenB.feasible?'text-green-700':'text-orange-600'}">
+          <span>${sc.scenB.feasible ? (sc.scenB.balance>50?'현금 잔여':'완전 균형') : '추가 필요 자금'}</span>
+          <span>${sc.scenB.feasible ? (sc.scenB.balance>50?fmt(sc.scenB.balance):'≈ $0') : '부족 '+fmt(Math.abs(sc.scenB.balance))}</span>
+        </div>
+        <div class="text-xs ${sc.scenB.feasible?'text-green-700 bg-green-50':'text-orange-600 bg-orange-50'} rounded-lg p-2 mt-1">
+          ${sc.scenB.feasible?'✓ 매도 대금으로 완전 리밸런싱 가능합니다':'⚠ 매도 후에도 추가 자금이 필요합니다'}
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>`;
+  })()}
+
   <!-- STEP 2 + 3 + sidebar -->
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
 
@@ -730,20 +852,33 @@ function rebalAnalysis() {
 
       <!-- STEP 2 -->
       <div class="bg-white rounded-2xl p-5 shadow-sm">
-        <div class="flex items-center gap-2 mb-4">
+        <div class="flex items-center gap-2 mb-1">
           <span class="step-num">2</span>
           <h2 class="font-bold text-slate-800">대분류 현황 비교</h2>
           <span class="ml-auto text-base font-bold text-slate-800">${fmt(totalVal)}</span>
+        </div>
+        <div class="flex items-center gap-2 mb-4 pl-7">
+          <span class="text-xs text-slate-400">허용 오차 (Tolerance Band):</span>
+          <input type="number" min="1" max="20" step="1" value="${S.toleranceBand}"
+            class="w-14 px-2 py-0.5 text-xs border border-slate-200 rounded-lg text-center font-semibold focus:outline-none focus:ring-2 focus:ring-blue-300"
+            oninput="S.toleranceBand=Math.max(1,parseFloat(this.value)||5)" onchange="render()">
+          <span class="text-xs text-slate-400">%  — 이 범위 내면 매매 불필요</span>
         </div>
         <div class="space-y-4">
           ${classSummary.map(c=>{
             const tgt = S.classTargets.find(t=>t.type===c.type);
             const tarW = tgt?tgt.weight:0;
             const diff = c.currentWeight - tarW;
-            const status = Math.abs(diff)<1 ? '적정' : diff>0 ? '과다' : '부족';
-            const stColor = Math.abs(diff)<1?'text-green-600 bg-green-50':diff>0?'text-red-600 bg-red-50':'text-blue-600 bg-blue-50';
+            const absDiff = Math.abs(diff);
+            const band = S.toleranceBand||5;
+            const isStable = absDiff <= band;
+            const isNearBand = !isStable && absDiff <= band * 1.5;
+            const status = isStable ? `안정적 (±${band}% 이내)` : diff>0 ? '과다 — 리밸런싱 권고' : '부족 — 리밸런싱 권고';
+            const stColor = isStable ? 'text-green-700 bg-green-50' : isNearBand ? 'text-amber-700 bg-amber-50' : diff>0?'text-red-600 bg-red-50':'text-blue-600 bg-blue-50';
+            const bandLo = Math.max(0,tarW-band);
+            const bandHi = Math.min(100,tarW+band);
             return `
-<div class="p-3 rounded-xl bg-slate-50">
+<div class="p-3 rounded-xl ${isStable?'bg-green-50/50':'bg-slate-50'} border ${isStable?'border-green-100':'border-transparent'}">
   <div class="flex items-center justify-between mb-2">
     <div class="flex items-center gap-2">
       <span class="badge ${TYPE_META[c.type].cls}">${c.label}</span>
@@ -753,17 +888,20 @@ function rebalAnalysis() {
       <span class="font-bold text-slate-800">${c.currentWeight.toFixed(1)}%</span>
       <span class="text-slate-300">→</span>
       <span class="font-bold" style="color:${c.color}">${tarW.toFixed(1)}%</span>
-      <span class="text-xs ${diff>1?'text-red-500':diff<-1?'text-blue-500':'text-slate-400'}">(${diff>0?'+':''}${diff.toFixed(1)}%)</span>
+      <span class="text-xs ${isStable?'text-green-500':diff>0?'text-red-500':'text-blue-500'}">(${diff>0?'+':''}${diff.toFixed(1)}%)</span>
     </div>
   </div>
   <div class="relative h-4 bg-slate-200 rounded-full overflow-hidden">
-    <div class="absolute inset-y-0 left-0 rounded-full opacity-25" style="width:${tarW}%;background:${c.color}"></div>
+    <!-- Tolerance band shading -->
+    <div class="absolute inset-y-0 rounded-full opacity-20" style="left:${bandLo}%;width:${bandHi-bandLo}%;background:${c.color}"></div>
+    <!-- Current bar -->
     <div class="absolute inset-y-0 left-0 rounded-full" style="width:${Math.min(c.currentWeight,100)}%;background:${c.color}"></div>
-    ${tarW>0?`<div class="absolute inset-y-0 border-l-2 border-white/80 border-dashed" style="left:${Math.min(tarW,100)}%"></div>`:''}
+    <!-- Target line -->
+    ${tarW>0?`<div class="absolute inset-y-0 border-l-2 border-white border-dashed" style="left:${Math.min(tarW,100)}%"></div>`:''}
   </div>
-  <div class="flex justify-between text-xs text-slate-400 mt-1">
-    <span>${fmt(c.classVal)}</span>
-    <span>목표 ${fmt(totalVal*tarW/100)}</span>
+  <div class="flex justify-between text-xs mt-1">
+    <span class="text-slate-400">${fmt(c.classVal)}</span>
+    <span class="${isStable?'text-green-600':'text-slate-400'}">목표 ${tarW}% ± ${band}% (${fmt(totalVal*bandLo/100)} ~ ${fmt(totalVal*bandHi/100)})</span>
   </div>
 </div>`;
           }).join('')}
@@ -776,28 +914,52 @@ function rebalAnalysis() {
           <span class="step-num">3</span>
           <div>
             <h2 class="font-bold text-slate-800">리밸런싱 실행 계획</h2>
-            <p class="text-xs text-slate-400">대분류 목표 비중을 달성하기 위한 종목별 매수/매도 — 같은 자산군은 현재 비율대로 분배됩니다</p>
+            <p class="text-xs text-slate-400">허용 오차(±${S.toleranceBand}%) 초과 시에만 매매 권고 — 범위 내 자산군은 현재 유지</p>
           </div>
         </div>
 
-        ${actionGroups.every(g=>g.actions.length===0&&!g.noHolding)
-          ? `<div class="px-5 py-8 text-center text-slate-400 text-sm">이미 목표 비중에 가깝게 구성되어 있습니다 ✓</div>`
+        ${actionGroups.every(g=>(g.stable||g.actions.length===0)&&!g.noHolding)
+          ? `<div class="px-5 py-8 text-center text-green-600 text-sm font-medium">✓ 모든 자산군이 허용 오차 범위 내에 있습니다<br><span class="text-slate-400 font-normal text-xs mt-1 block">현재 비중이 목표 대비 ±${S.toleranceBand}% 이내로 안정적입니다</span></div>`
           : actionGroups.map(group=>{
               const m = TYPE_META[group.type];
               const ct = S.classTargets.find(t=>t.type===group.type);
               const tarW = ct?ct.weight:0;
               const classInfo = classSummary.find(c=>c.type===group.type);
               const curW = classInfo?classInfo.currentWeight:0;
-              const isOk = Math.abs(curW-tarW)<1;
+              const band = S.toleranceBand||5;
+
+              if (group.stable) {
+                const isBuyOnlyHeld = group.buyOnlyHold;
+                return `
+<div class="cls-header px-5 py-3 flex items-center justify-between border-b border-slate-100 ${isBuyOnlyHeld?'bg-blue-50/50':'bg-green-50/60'}">
+  <div class="flex items-center gap-2">
+    <span class="badge ${m.cls}">${m.label}</span>
+    <span class="text-sm text-slate-600 font-medium">${curW.toFixed(1)}% → ${tarW.toFixed(1)}%</span>
+    <span class="text-xs font-semibold px-2 py-0.5 rounded-full ${isBuyOnlyHeld?'text-blue-700 bg-blue-100':'text-green-700 bg-green-100'}">
+      ${isBuyOnlyHeld?'📥 매수 전용 — 매도 생략':'✓ 안정적 — 오차 범위 내'}
+    </span>
+  </div>
+  <span class="text-xs ${isBuyOnlyHeld?'text-blue-600':'text-green-600'}">
+    ${isBuyOnlyHeld?`편차 ${group.diff.toFixed(1)}% (매도 생략)`:`편차 ${group.diff.toFixed(1)}% (허용 ±${band}%)`}
+  </span>
+</div>
+<div class="pl-8 pr-5 py-2.5 ${isBuyOnlyHeld?'bg-blue-50/30':'bg-green-50/30'} border-b border-slate-100">
+  <p class="text-xs ${isBuyOnlyHeld?'text-blue-700':'text-green-700'}">
+    ${isBuyOnlyHeld
+      ? '매수 전용 전략 선택 — 이 자산군은 매도하지 않습니다. 전체 리밸런싱 전략으로 변경하면 매도가 추천됩니다.'
+      : '이 자산군은 매매 없이 현재 상태를 유지하세요. 거래 비용 절감 효과가 있습니다.'}
+  </p>
+</div>`;
+              }
 
               const classLine = `
 <div class="cls-header px-5 py-2.5 flex items-center justify-between border-b border-slate-200">
   <div class="flex items-center gap-2">
     <span class="badge ${m.cls}">${m.label}</span>
     <span class="text-sm text-slate-600 font-medium">${curW.toFixed(1)}% → ${tarW.toFixed(1)}%</span>
-    ${isOk?'<span class="text-xs text-green-600 font-semibold">✓ 적정</span>':''}
+    <span class="text-xs text-amber-700 font-semibold bg-amber-50 px-2 py-0.5 rounded-full">편차 ${group.diff.toFixed(1)}% — 리밸런싱 권고</span>
   </div>
-  ${!isOk&&classInfo?`<span class="text-xs text-slate-500">${curW>tarW?'매도':'매수'} 필요 ${fmt(Math.abs(totalVal*tarW/100 - classInfo.classVal))}</span>`:''}
+  ${classInfo?`<span class="text-xs text-slate-500">${curW>tarW?'매도':'매수'} 필요 ${fmt(Math.abs(totalVal*tarW/100 - classInfo.classVal))}</span>`:''}
 </div>`;
 
               const tickerLines = group.noHolding && tarW>0 ? `
@@ -890,9 +1052,13 @@ function rebalAnalysis() {
         const netBuy = Math.max(0, totalBuy - totalSell);
         const remaining = cashDisp - netBuy;
         const sufficient = remaining >= 0;
+        // Rounding artifact: if shortfall < 2% of total, it's just integer share rounding
+        const shortfallRatio = sufficient ? 0 : Math.abs(remaining) / totalVal * 100;
+        const isRoundingArtifact = !sufficient && shortfallRatio < 2;
         return `
 <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs space-y-2">
   <div class="font-semibold text-amber-800 flex items-center gap-1.5">💵 현금 활용 계획</div>
+  ${totalBuy>0&&totalSell===0?`<div class="text-xs text-blue-700 bg-blue-50 rounded-lg px-2 py-1.5 mb-1">📥 Inflow Priority — 보유 현금으로 매수만 진행 (매도 없음)</div>`:''}
   <div class="flex justify-between text-slate-600">
     <span>보유 현금</span><span class="font-semibold">${fmt(cashDisp)}</span>
   </div>
@@ -900,13 +1066,19 @@ function rebalAnalysis() {
     <span>필요 매수 합계</span><span class="font-semibold text-blue-600">${fmt(totalBuy)}</span>
   </div>
   ${totalSell>0?`<div class="flex justify-between text-slate-600">
-    <span>매도 회수 예정</span><span class="font-semibold text-red-500">+${fmt(totalSell)}</span>
+    <span>매도 회수 예정</span><span class="font-semibold text-green-600">+${fmt(totalSell)}</span>
   </div>`:''}
-  <div class="border-t border-amber-200 pt-2 flex justify-between font-semibold ${sufficient?'text-green-700':'text-red-600'}">
-    <span>${sufficient?'현금 잔여':'추가 필요 자금'}</span>
-    <span>${sufficient?fmt(remaining):'부족 '+fmt(Math.abs(remaining))}</span>
+  <div class="border-t border-amber-200 pt-2 flex justify-between font-semibold ${sufficient||isRoundingArtifact?'text-green-700':'text-orange-600'}">
+    <span>${sufficient?'현금 잔여':isRoundingArtifact?'단수주 오차 (무시 가능)':'추가 필요 자금'}</span>
+    <span>${sufficient?fmt(remaining):(isRoundingArtifact?'~'+fmt(Math.abs(remaining)):'부족 '+fmt(Math.abs(remaining)))}</span>
   </div>
-  ${sufficient?'<div class="text-green-700 text-xs">✓ 현금만으로 리밸런싱 가능합니다</div>':'<div class="text-red-600 text-xs">⚠ 일부 자산 매도가 필요합니다</div>'}
+  ${sufficient
+    ?'<div class="text-green-700">✓ 현금만으로 리밸런싱 가능합니다</div>'
+    :isRoundingArtifact
+      ?`<div class="text-green-700">✓ 정수 단위 주수 계산에서 발생한 오차입니다<br><span class="text-slate-500">전체 자산 대비 ${shortfallRatio.toFixed(1)}% 수준 — 포트폴리오 성과에 영향 없음</span></div>`
+      :(S.rebalMode==='A'
+        ?'<div class="text-orange-600">추가 입금 필요 — 또는 B 전략(전체 리밸런싱)으로 변경하세요</div>'
+        :'<div class="text-orange-600">매도 대금으로 충당하거나 추가 입금이 필요합니다</div>')}
 </div>`;
       })():''}
     </div>
@@ -925,6 +1097,7 @@ function calcClassSummary(validH, totalVal) {
 }
 
 function calcActionGroups(validH, totalVal, classSummary) {
+  const band = S.toleranceBand || 5;
   return TYPES.map(type=>{
     const ct = S.classTargets.find(t=>t.type===type);
     if (!ct) return null;
@@ -937,8 +1110,16 @@ function calcActionGroups(validH, totalVal, classSummary) {
       return { type, actions:[], noHolding: ct.weight>0 };
     }
 
+    // Tolerance Band: if class deviation is within band, mark as stable
+    const classDiff = Math.abs(classCurrentPct - ct.weight);
+    const classStable = classDiff <= band;
+    const rebalMode = S.rebalMode || 'B';
+
+    // In buy-only mode: overweight classes → keep as hold (no selling)
+    const classIsOverweight = classCurrentPct > ct.weight;
+    const buyOnlyHold = rebalMode === 'A' && classIsOverweight && !classStable;
+
     const targetVal = totalVal * ct.weight / 100;
-    const classDelta = targetVal - classVal;
 
     const actions = classH.map(h=>{
       const hVal = h.price*parseFloat(h.shares||0)*rate();
@@ -957,15 +1138,64 @@ function calcActionGroups(validH, totalVal, classSummary) {
       const hDelta = hTargetVal - hVal;
       const dispP = toDisp(h.price);
       const shares = Math.round(Math.abs(hDelta) / dispP);
-      const action = Math.abs(hCurrentPct - hTargetPct) < 0.5 ? 'hold'
+
+      // Within tolerance band → hold; buy-only mode → no sells
+      const action = classStable || buyOnlyHold ? 'hold'
+                   : Math.abs(hCurrentPct - hTargetPct) < 0.5 ? 'hold'
                    : hDelta > 0 ? 'buy' : 'sell';
 
       return { ticker:h.ticker, type, currentPct:hCurrentPct, targetPct:hTargetPct,
-               delta:hDelta, shares, price:h.price, action };
+               delta:hDelta, shares, price:h.price, action, classStable };
     });
 
-    return { type, actions, noHolding:false };
+    return { type, actions, noHolding:false, stable:classStable || buyOnlyHold, diff:classDiff, buyOnlyHold };
   }).filter(Boolean);
+}
+
+// ─── SCENARIO CALCULATOR ──────────────────────────────────
+function calcScenarios(validH, totalVal, cashDisp, classSummary) {
+  const band = S.toleranceBand || 5;
+  const actionClasses = classSummary.filter(c => {
+    const diff = Math.abs(c.currentWeight - (S.classTargets.find(t=>t.type===c.type)?.weight||0));
+    return diff > band; // only classes outside tolerance band
+  });
+
+  let totalBuyNeeded = 0, totalSellProceeds = 0;
+  const buyDetails = [], sellDetails = [];
+
+  actionClasses.forEach(c => {
+    const ct = S.classTargets.find(t=>t.type===c.type);
+    const targetVal = totalVal * (ct?.weight||0) / 100;
+    const delta = targetVal - c.classVal;
+    if (delta > 0) {
+      totalBuyNeeded += delta;
+      buyDetails.push({ type: c.type, label: c.label, amount: delta });
+    } else {
+      totalSellProceeds += Math.abs(delta);
+      sellDetails.push({ type: c.type, label: c.label, amount: Math.abs(delta) });
+    }
+  });
+
+  const hasSell = sellDetails.length > 0;
+  const hasBuy = buyDetails.length > 0;
+  const bothNeeded = hasSell && hasBuy;
+
+  // Scenario A: Buy-Only (no selling)
+  const scenAExtraNeeded = Math.max(0, totalBuyNeeded - cashDisp);
+  const scenACashSurplus = Math.max(0, cashDisp - totalBuyNeeded);
+  const scenAFeasible = scenAExtraNeeded < 1;
+
+  // Scenario B: Full Rebalancing (sell + buy + cash)
+  const scenBAvailable = cashDisp + totalSellProceeds;
+  const scenBBalance = scenBAvailable - totalBuyNeeded;
+  const scenBFeasible = scenBBalance >= -50;
+
+  return {
+    totalBuyNeeded, totalSellProceeds, buyDetails, sellDetails,
+    hasSell, hasBuy, bothNeeded,
+    scenA: { feasible: scenAFeasible, extraNeeded: scenAExtraNeeded, cashSurplus: scenACashSurplus },
+    scenB: { feasible: scenBFeasible, available: scenBAvailable, balance: scenBBalance },
+  };
 }
 
 // Auto-fill targetPct proportionally from class targets
