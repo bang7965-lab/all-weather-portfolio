@@ -91,18 +91,25 @@ let chartA = null, chartB = null;
 
 // ─── API ──────────────────────────────────────────────────
 async function fetchPrice(sym) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`;
-  const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-  try {
+  const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`;
+  const proxies = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(yUrl)}`,
+    `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`,
+  ];
+  const tryProxy = async (proxy) => {
     const ctrl = new AbortController();
-    const t = setTimeout(()=>ctrl.abort(), 12000);
-    const res = await fetch(proxy, { signal: ctrl.signal });
-    clearTimeout(t);
-    const d = await res.json();
-    const r = d?.chart?.result?.[0];
-    if (!r) return null;
-    return { price: r.meta.regularMarketPrice, name: r.meta.longName || r.meta.shortName || sym };
-  } catch { return null; }
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(proxy, { signal: ctrl.signal });
+      clearTimeout(t);
+      const d = await res.json();
+      const r = d?.chart?.result?.[0];
+      if (!r) throw 0;
+      return { price: r.meta.regularMarketPrice, name: r.meta.longName || r.meta.shortName || sym };
+    } catch { clearTimeout(t); throw 0; }
+  };
+  try { return await Promise.any(proxies.map(p => tryProxy(p))); }
+  catch { return null; }
 }
 
 async function fetchKrw() {
@@ -1283,7 +1290,12 @@ window.doFetchNew = async()=>{
   const btn=document.getElementById('btnFetch');
   if(btn){btn.disabled=true;document.getElementById('fetchIco').innerHTML='<div class="spin"></div>';document.getElementById('fetchTxt').textContent='조회 중…';}
   for(const a of S.assets){a.loading=true;a.price=null;}
-  for(const a of S.assets){const d=await fetchPrice(a.ticker);a.loading=false;if(d){a.price=d.price;if(d.name&&d.name.length>3)a.name=d.name;}}
+  render();
+  await Promise.allSettled(S.assets.map(async a=>{
+    const d=await fetchPrice(a.ticker);
+    a.loading=false;if(d){a.price=d.price;if(d.name&&d.name.length>3)a.name=d.name;}
+    render();
+  }));
   S.pricesFetched=true;render();
 };
 window.addHolding = ()=>{ S.holdings.push({id:Date.now(),ticker:'',shares:'',price:null,type:null,targetPct:null,loading:false});render(); };
@@ -1296,7 +1308,14 @@ window.cycleHType = i=>{ S.holdings[i].type=TYPES[(TYPES.indexOf(S.holdings[i].t
 window.doFetchRebal = async()=>{
   const btn=document.getElementById('rBtn');
   if(btn){btn.disabled=true;document.getElementById('rIco').innerHTML='<div class="spin"></div>';document.getElementById('rTxt').textContent='조회 중…';}
-  for(const h of S.holdings){if(!h.ticker)continue;h.loading=true;const d=await fetchPrice(h.ticker);h.loading=false;if(d)h.price=d.price;if(!h.type)h.type=KNOWN[h.ticker]||'stock';}
+  const validH=S.holdings.filter(h=>h.ticker);
+  for(const h of validH){h.loading=true;}
+  render();
+  await Promise.allSettled(validH.map(async h=>{
+    const d=await fetchPrice(h.ticker);
+    h.loading=false;if(d)h.price=d.price;if(!h.type)h.type=KNOWN[h.ticker]||'stock';
+    render();
+  }));
   S.rFetched=true;
   render();
 };
