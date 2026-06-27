@@ -86,6 +86,8 @@ const S = {
   cash: 0, // stored in USD; user inputs in display currency
   toleranceBand: 5, // ± % — classes within this band are "stable", no trade needed
   rebalMode: 'B',  // 'A' = buy-only, 'B' = full rebalancing
+  smartRec: null,
+  smartLoading: false,
 };
 let chartA = null, chartB = null;
 
@@ -106,6 +108,28 @@ async function fetchPrice(sym) {
       const r = d?.chart?.result?.[0];
       if (!r) throw 0;
       return { price: r.meta.regularMarketPrice, name: r.meta.longName || r.meta.shortName || sym };
+    } catch { clearTimeout(t); throw 0; }
+  };
+  try { return await Promise.any(proxies.map(p => tryProxy(p))); }
+  catch { return null; }
+}
+
+async function fetchHistorical(sym) {
+  const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=6mo`;
+  const proxies = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(yUrl)}`,
+    `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`,
+  ];
+  const tryProxy = async (proxy) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      const res = await fetch(proxy, { signal: ctrl.signal });
+      clearTimeout(t);
+      const d = await res.json();
+      const closes = d?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+      if (!closes || closes.length < 10) throw 0;
+      return closes.filter(x => x != null);
     } catch { clearTimeout(t); throw 0; }
   };
   try { return await Promise.any(proxies.map(p => tryProxy(p))); }
@@ -145,6 +169,137 @@ async function fetchKrw() {
 
 // Auto-fetch KRW on startup
 fetchKrw();
+
+// ─── SMART RECOMMENDATION ─────────────────────────────────
+window.calcSmartAlloc = async () => {
+  S.smartLoading = true; S.smartRec = null; render();
+  const SYMS = ['SPY','^TNX','^IRX','GLD','USO','^VIX'];
+  const fetched = await Promise.allSettled(SYMS.map(s => fetchHistorical(s)));
+  const hist = {};
+  SYMS.forEach((s,i) => { hist[s] = fetched[i].status==='fulfilled' ? fetched[i].value : null; });
+
+  function ret(prices, days) {
+    if (!prices || prices.length <= days) return null;
+    const cur = prices[prices.length-1];
+    const old = prices[Math.max(0, prices.length-1-days)];
+    return old ? (cur-old)/old : null;
+  }
+  function last(p) { return p ? p[p.length-1] : null; }
+  function pctStr(v) { return v==null?'N/A':`${v>0?'+':''}${(v*100).toFixed(1)}%`; }
+
+  const sig = {
+    spy: { ret6M:ret(hist.SPY,126), ret1M:ret(hist.SPY,22), ret1W:ret(hist.SPY,5) },
+    tnx: { level:last(hist['^TNX']), ret1M:ret(hist['^TNX'],22) },
+    irx: { level:last(hist['^IRX']), ret1M:ret(hist['^IRX'],22), ret6M:ret(hist['^IRX'],126) },
+    gld: { ret6M:ret(hist.GLD,126), ret1M:ret(hist.GLD,22), ret1W:ret(hist.GLD,5) },
+    uso: { ret6M:ret(hist.USO,126), ret1M:ret(hist.USO,22), ret1W:ret(hist.USO,5) },
+    vix: { level:last(hist['^VIX']) },
+  };
+
+  // Regime detection
+  let growthScore = 0, inflScore = 0;
+  if ((sig.spy.ret6M||0) > 0) growthScore++;
+  if ((sig.spy.ret1M||0) > 0) growthScore++; else growthScore--;
+  if ((sig.vix.level||0) > 20) growthScore--;
+  if ((sig.gld.ret6M||0) > 0.05) inflScore++;
+  if ((sig.uso.ret6M||0) > 0) inflScore++;
+  if ((sig.uso.ret1M||0) > 0) inflScore++;
+
+  const REGIMES = {
+    boom:        { label:'경기 호황',           color:'#16a34a' },
+    goldilocks:  { label:'골디락스',             color:'#2563eb' },
+    stagflation: { label:'스태그플레이션 초입',  color:'#d97706' },
+    recession:   { label:'경기 침체',            color:'#dc2626' },
+  };
+  const regimeKey = growthScore>0 && inflScore>0 ? 'boom'
+    : growthScore>0 && inflScore<=0 ? 'goldilocks'
+    : growthScore<=0 && inflScore>0 ? 'stagflation'
+    : 'recession';
+
+  // Base weights (Ray Dalio original)
+  const BASE = { SPY:30, TLT:40, IEF:15, GLD:7.5, PDBC:7.5 };
+
+  // Stock adjustment (cap ±8%)
+  let spyAdj = 0;
+  if ((sig.spy.ret1M||0) < 0) spyAdj -= 4;
+  if ((sig.spy.ret1W||0) < 0 && (sig.spy.ret1M||0) < 0) spyAdj -= 2;
+  if ((sig.vix.level||0) > 25) spyAdj -= 2;
+  if ((sig.vix.level||0) > 20) spyAdj -= 1;
+  if ((sig.spy.ret6M||0) > 0.05) spyAdj += 2;
+  spyAdj = Math.max(-8, Math.min(8, Math.round(spyAdj)));
+
+  // Bond adjustment (TLT & IEF, total cap ±10%)
+  let tltAdj = 0, iefAdj = 0;
+  if ((sig.irx.ret1M||0) > 0.02) tltAdj -= 5;
+  if ((sig.irx.ret6M||0) > 0.05) tltAdj -= 3;
+  if ((sig.tnx.level||0) > 4.0) tltAdj -= 2;
+  tltAdj = Math.max(-10, Math.min(5, tltAdj));
+  if (tltAdj < 0) iefAdj = Math.min(-tltAdj * 0.6, 8);
+  if ((sig.tnx.ret1M||0) > 0 && (sig.irx.ret1M||0) <= 0.02) iefAdj = Math.max(iefAdj-2, 0);
+  iefAdj = Math.max(-5, Math.min(8, iefAdj));
+  const totalBondAdj = tltAdj + iefAdj;
+  if (Math.abs(totalBondAdj) > 10) {
+    const sc = 10 / Math.abs(totalBondAdj);
+    tltAdj = Math.round(tltAdj * sc); iefAdj = Math.round(iefAdj * sc);
+  }
+
+  // Real assets adjustment (max +7% total, GLD+PDBC cap 22%)
+  let gldAdj = 0, pdbcAdj = 0;
+  if ((sig.gld.ret6M||0) > 0.05) gldAdj += 2;
+  if ((sig.gld.ret1M||0) > 0) gldAdj += 1.5; else gldAdj -= 1;
+  if ((sig.gld.ret1W||0) < 0 && (sig.gld.ret1M||0) < 0) gldAdj -= 0.5;
+  if ((sig.uso.ret6M||0) > 0) pdbcAdj += 2;
+  if ((sig.uso.ret1M||0) > 0) pdbcAdj += 2;
+  if ((sig.uso.ret1W||0) > 0) pdbcAdj += 1;
+  const totalRealAdj = gldAdj + pdbcAdj;
+  if (totalRealAdj > 7) { const sc = 7/totalRealAdj; gldAdj = Math.round(gldAdj*sc*2)/2; pdbcAdj = Math.round(pdbcAdj*sc*2)/2; }
+  gldAdj = Math.max(0, gldAdj); pdbcAdj = Math.max(0, pdbcAdj);
+
+  // Apply & normalize
+  const raw = { SPY: BASE.SPY+spyAdj, TLT: BASE.TLT+tltAdj, IEF: BASE.IEF+iefAdj, GLD: BASE.GLD+gldAdj, PDBC: BASE.PDBC+pdbcAdj };
+  const total = Object.values(raw).reduce((s,v)=>s+v, 0);
+  const weights = {};
+  Object.keys(raw).forEach(k => { weights[k] = Math.round(raw[k]/total*1000)/10; });
+  const deltas = {};
+  Object.keys(weights).forEach(k => { deltas[k] = Math.round((weights[k]-BASE[k])*10)/10; });
+
+  const reasons = {
+    SPY: spyAdj < -3 ? `1M ${pctStr(sig.spy.ret1M)} · VIX ${Math.round(sig.vix.level||0)} 상승` :
+         spyAdj < 0  ? `단기 모멘텀 약화` :
+         spyAdj > 0  ? `6M 추세 양호` : `신호 혼재, 원본 유지`,
+    TLT: tltAdj < -4 ? `단기 금리 상승 → 장기채 가격 하락 위험` :
+         tltAdj < 0  ? `고금리 지속 환경` : `금리 안정, 원본 유지`,
+    IEF: iefAdj > 3  ? `TLT 대비 금리 민감도 낮음, 채권 내 구성 조정` :
+         iefAdj > 0  ? `상대적 안정, 일부 확대` : `원본 유지`,
+    GLD: gldAdj > 1  ? `6M ${pctStr(sig.gld.ret6M)} 강세 (1M ${pctStr(sig.gld.ret1M)})` :
+         gldAdj > 0  ? `인플레 헤지 유효, 모멘텀 약화로 최소 조정` : `원본 유지`,
+    PDBC: pdbcAdj > 1 ? `USO 전 구간 상승 (6M ${pctStr(sig.uso.ret6M)})` :
+          pdbcAdj > 0 ? `에너지 상승 추세 지속` : `원본 유지`,
+  };
+
+  S.smartRec = { regimeKey, regime: REGIMES[regimeKey], sig, weights, deltas, reasons,
+    fetchedAt: new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'}) };
+  S.smartLoading = false;
+  render();
+};
+
+window.applySmartRec = () => {
+  const w = S.smartRec.weights;
+  const META = {
+    SPY:  { name:'미국 주식 (S&P 500 ETF)', type:'stock', color:'#3b82f6' },
+    TLT:  { name:'장기 미국 국채 (20+년)',   type:'bond',  color:'#10b981' },
+    IEF:  { name:'중기 미국 국채 (7~10년)',  type:'bond',  color:'#34d399' },
+    GLD:  { name:'금 ETF',                  type:'comm',  color:'#f59e0b' },
+    PDBC: { name:'원자재 ETF',               type:'comm',  color:'#d97706' },
+  };
+  S.assets = Object.keys(w).map(tk => ({
+    ticker:tk, name:META[tk].name, type:META[tk].type,
+    weight:w[tk], color:META[tk].color, price:null, loading:false,
+  }));
+  S.pricesFetched = false;
+  render();
+  doFetchNew();
+};
 
 // ─── DEBOUNCE ─────────────────────────────────────────────
 let _rt=null;
@@ -221,6 +376,113 @@ function landing() {
 </div>`;
 }
 
+// ─── SMART REC CARD ───────────────────────────────────────
+function smartRecCard() {
+  if (S.smartLoading) return `
+<div class="bg-white rounded-2xl p-5 shadow-sm">
+  <div class="flex items-center gap-3 text-slate-500">
+    <div class="spin" style="width:18px;height:18px;border:2px solid #cbd5e1;border-top-color:#3b82f6;border-radius:50%;"></div>
+    <span class="text-sm">경제 지표 분석 중… (6개 지표 수집)</span>
+  </div>
+</div>`;
+
+  if (!S.smartRec) return `
+<div class="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl p-5 shadow-sm border border-blue-100">
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h2 class="font-bold text-slate-800 mb-1">✨ 스마트 비중 추천</h2>
+      <p class="text-sm text-slate-500 leading-relaxed">Yahoo Finance 지표(수익률 곡선·모멘텀)를 분석해<br>레이달리오 올웨더 비중을 현재 경제 국면에 맞게 재산정합니다.</p>
+    </div>
+    <button onclick="calcSmartAlloc()"
+      class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium text-sm whitespace-nowrap flex-shrink-0">
+      분석 시작
+    </button>
+  </div>
+</div>`;
+
+  const r = S.smartRec;
+  const BASE = { SPY:30, TLT:40, IEF:15, GLD:7.5, PDBC:7.5 };
+  const CATS = [
+    { label:'주식', keys:['SPY'], limit:'±8%' },
+    { label:'채권', keys:['TLT','IEF'], limit:'±10% (합산)' },
+    { label:'실물자산', keys:['GLD','PDBC'], limit:'+7% 이내 (합산)' },
+  ];
+
+  const rows = Object.keys(r.weights).map(tk => {
+    const base = BASE[tk];
+    const adj  = r.weights[tk];
+    const delta = r.deltas[tk];
+    const barBase = Math.round(base / 50 * 100);
+    const barAdj  = Math.round(adj  / 50 * 100);
+    const color = { SPY:'#3b82f6', TLT:'#10b981', IEF:'#34d399', GLD:'#f59e0b', PDBC:'#d97706' }[tk];
+    const deltaHtml = delta === 0
+      ? `<span class="text-xs text-slate-400">유지</span>`
+      : delta > 0
+        ? `<span class="text-xs font-semibold text-blue-600">+${delta}%</span>`
+        : `<span class="text-xs font-semibold text-red-500">${delta}%</span>`;
+    return `
+<div class="py-2.5 border-t border-slate-100 first:border-0">
+  <div class="flex items-center gap-3">
+    <div class="w-14 flex-shrink-0">
+      <div class="font-mono font-bold text-xs text-slate-700">${tk}</div>
+    </div>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="text-xs text-slate-400 line-through">${base}%</span>
+        <span class="text-sm font-bold text-slate-800">${adj}%</span>
+        ${deltaHtml}
+      </div>
+      <div class="relative h-2.5 bg-slate-100 rounded-full overflow-hidden">
+        <div class="absolute inset-y-0 left-0 rounded-full opacity-30" style="width:${barBase}%;background:${color}"></div>
+        <div class="absolute inset-y-0 left-0 rounded-full" style="width:${barAdj}%;background:${color}"></div>
+      </div>
+    </div>
+    <div class="w-36 flex-shrink-0 text-xs text-slate-400 leading-relaxed">${r.reasons[tk]}</div>
+  </div>
+</div>`;
+  }).join('');
+
+  // Regime color mapping
+  const regimeColors = { boom:'bg-green-100 text-green-800', goldilocks:'bg-blue-100 text-blue-800', stagflation:'bg-amber-100 text-amber-800', recession:'bg-red-100 text-red-800' };
+
+  return `
+<div class="bg-white rounded-2xl shadow-sm overflow-hidden">
+  <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+    <div class="flex items-center gap-3">
+      <h2 class="font-bold text-slate-800">✨ 스마트 비중 추천</h2>
+      <span class="text-xs px-2.5 py-1 rounded-full font-semibold ${regimeColors[r.regimeKey]}">${r.regime.label}</span>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs text-slate-400">${r.fetchedAt} 기준</span>
+      <button onclick="calcSmartAlloc()" class="text-xs text-slate-400 hover:text-slate-600 underline">재분석</button>
+    </div>
+  </div>
+
+  <div class="px-5 py-3 bg-amber-50 border-b border-amber-100 flex gap-2">
+    <span class="text-amber-500 flex-shrink-0 mt-0.5">⚠</span>
+    <p class="text-xs text-amber-700 leading-relaxed">이 추천은 Yahoo Finance 가격 지표 기반으로 레이달리오 올웨더 비중을 재산정한 것입니다. 지정학·정책 등 비정형 이벤트는 반영되지 않으며, 투자 판단의 최종 책임은 본인에게 있습니다.</p>
+  </div>
+
+  <div class="px-5 py-1">
+    <div class="flex gap-4 py-2 text-xs text-slate-400 border-b border-slate-100">
+      ${CATS.map(c=>`<span><b class="text-slate-600">${c.label}</b> 조정 상한 ${c.limit}</span>`).join(' · ')}
+    </div>
+    ${rows}
+  </div>
+
+  <div class="px-5 py-4 bg-slate-50 border-t border-slate-100 flex items-center gap-3">
+    <button onclick="applySmartRec()"
+      class="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium text-sm">
+      이 비중으로 포트폴리오 구성하기
+    </button>
+    <button onclick="S.smartRec=null;render()"
+      class="px-4 py-2.5 border border-slate-200 text-slate-500 hover:bg-slate-100 rounded-xl text-sm">
+      닫기
+    </button>
+  </div>
+</div>`;
+}
+
 // ─── NEW PORTFOLIO ────────────────────────────────────────
 function newPage() {
   const totalW = S.assets.reduce((s,a)=>s+parseFloat(a.weight||0),0);
@@ -238,6 +500,7 @@ function newPage() {
   </nav>
   <div class="max-w-6xl mx-auto p-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
     <div class="lg:col-span-2 space-y-5">
+      ${smartRecCard()}
       <div class="bg-white rounded-2xl p-5 shadow-sm">
         <h2 class="font-bold text-slate-800 mb-3">💰 투자 금액</h2>
         <div class="flex gap-3">
